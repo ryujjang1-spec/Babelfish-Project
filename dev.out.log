@@ -1,0 +1,22 @@
+
+> ondemand-realtime-concierge-source@0.1.0 dev
+> concurrently -n server,web -c blue,green "npm run dev:server" "npm run dev:web"
+
+[server] 
+[server] > ondemand-realtime-concierge-source@0.1.0 dev:server
+[server] > tsx watch server/index.ts
+[server] 
+[web] 
+[web] > ondemand-realtime-concierge-source@0.1.0 dev:web
+[web] > next dev -p 3000
+[web] 
+[server] Concierge API server listening on http://localhost:8787
+[web]   ▲ Next.js 14.2.35
+[web]   - Local:        http://localhost:3000
+[web]   - Environments: .env
+[web] 
+[web]  ✓ Starting...
+[web]  ✓ Ready in 2.6s
+[web]  ○ Compiling / ...
+[web]  ✓ Compiled / in 6.2s (497 modules)
+[web]  GET / 200 in 6573ms

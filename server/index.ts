@@ -57,7 +57,7 @@ Babelfish는 고객 요청을 이해하고, 기본 서비스 인프라와 제휴
 서비스 실행 전에는 고객 확인을 받습니다.`;
 
 app.use(cors({
-  origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
+  origin: true,
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));

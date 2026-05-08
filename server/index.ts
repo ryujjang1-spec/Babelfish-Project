@@ -17,8 +17,10 @@ if (existsSync(envPath)) {
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
 const realtimeModel = process.env.OPENAI_REALTIME_MODEL ?? "gpt-realtime";
+const realtimeVoice = "coral";
+const realtimeVoiceSpeed = 1.0;
 
-const FIRST_MESSAGE = "안녕하세요, Babelfish입니다. 제휴 서비스와 연결해 실행까지 도와드리겠습니다. 원하시는 내용을 말씀해 주세요.";
+const FIRST_MESSAGE = "안녕하세요? 고객님의 비서 바벨피시 입니다. 원하시는 서비스를 말씀해주세요.";
 
 const instructions = `당신은 Babelfish_온디멘드 컨시어지의 젊고 밝은 여성 AI 컨시어지 Babelfish입니다.
 Babelfish는 고객 요청을 이해하고, 기본 서비스 인프라와 제휴 네트워크를 연결해 실제 실행까지 돕습니다.
@@ -45,6 +47,8 @@ Babelfish는 고객 요청을 이해하고, 기본 서비스 인프라와 제휴
 첫 응답은 정확히 다음 문장만 말합니다: ${FIRST_MESSAGE}
 첫 응답 이후에는 고객이 실제로 요청을 말할 때만 응답하고, 고객이 말하지 않으면 추가로 말하지 않습니다.
 답변은 항상 짧고 친절하게 하며 보통 1~2문장으로 말합니다.
+음성은 항상 coral 음성으로 고정하고, 밝고 차분한 젊은 여성 상담원 톤과 일정한 속도를 유지합니다.
+매 응답의 말투, 높낮이, 속도는 현재 세션에서 송출되는 톤과 동일하게 유지합니다.
 고객 말씀이 끝난 뒤 응답합니다.
 고객 요청은 먼저 짧게 확인하고, 중요한 요청은 실행 전에 이해한 내용이 맞는지 되묻습니다.
 고객 요청 후에는 반드시 "제가 이해한 내용은 ...입니다. 맞으실까요?" 형식으로 리마인드하고 검증합니다.
@@ -92,7 +96,7 @@ async function createRealtimeSession(_req: express.Request, res: express.Respons
           model: realtimeModel,
           instructions,
           audio: {
-            output: { voice: "coral", speed: 1.0 },
+            output: { voice: realtimeVoice, speed: realtimeVoiceSpeed },
             input: {
               noise_reduction: { type: "near_field" },
               transcription: {

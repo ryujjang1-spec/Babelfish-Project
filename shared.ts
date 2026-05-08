@@ -75,8 +75,7 @@ export function detectLanguage(text: string): LanguageCode {
 }
 
 export function isShortConfirmation(text: string) {
-  const normalized = normalizeUtterance(text);
-  return confirmationWords.some((word) => normalizeUtterance(word) === normalized);
+  return hasConfirmationIntent(text);
 }
 
 export function hasConfirmationIntent(text: string) {

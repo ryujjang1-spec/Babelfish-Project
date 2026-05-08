@@ -7,7 +7,10 @@
     "dev": "concurrently -n server,web -c blue,green \"npm run dev:server\" \"npm run dev:web\"",
     "dev:web": "next dev -p 3000",
     "dev:server": "tsx watch server/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "next build",
+    "start:web": "next start -p 3000",
+    "start:server": "tsx server/index.ts"
   },
   "dependencies": {
     "concurrently": "^8.2.2",

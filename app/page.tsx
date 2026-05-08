@@ -2,34 +2,15 @@
 
 import {
   analyzeRequest,
-  buildPlaceConfirmationQuestion,
-  getPlaceCandidates,
-  hasConfirmationIntent,
-  hasRequestIntent,
   isAssistantEcho,
-  isHumanSpeechCandidate,
-  isLikelyValidUserUtterance,
-  isNegativeConfirmation,
   isNoiseLikeTranscript,
-  isPartnerRefusal,
-  isServiceImprovementCommand,
-  isShortConfirmation,
   normalizePlaceCandidate,
   type ConciergeAnalysis,
   type OrderStatus,
   type ServiceSlots
 } from "../shared";
-import {
-  buildDemoSuccessMessage as policyBuildDemoSuccessMessage,
-  buildPartnerVoiceSummary as policyBuildPartnerVoiceSummary,
-  buildPartnerRefusalReply as policyBuildPartnerRefusalReply,
-  buildProviderFirstReply as policyBuildProviderFirstReply,
-  buildSubmittedMessage as policyBuildSubmittedMessage,
-  ensureProviderMention as policyEnsureProviderMention,
-  getVisiblePartnerNames as policyGetVisiblePartnerNames,
-  joinKoreanList as policyJoinKoreanList
-} from "../partnerPolicy";
-import { buildContextFallback as stateBuildContextFallback, checkingHint, DEMO_SUCCESS_DELAY_MS, isEndOfServiceIntent, standbyMessage, voiceEndMessage } from "../serviceStateMachine";
+import { ensureProviderMention as policyEnsureProviderMention } from "../partnerPolicy";
+import { buildContextFallback as stateBuildContextFallback, DEMO_SUCCESS_DELAY_MS, standbyMessage } from "../serviceStateMachine";
 import {
   AI_RESPONSE_STUCK_TIMEOUT_MS,
   ASSISTANT_ECHO_GUARD_MS,
@@ -44,13 +25,22 @@ import {
   isProbablyForeignNoise,
   isValidFinalTranscript
 } from "../voiceGuard";
-import { CircleStop, Mic, Phone, Send, ShieldAlert } from "lucide-react";
+import { CircleStop, Mic, Phone, Send } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8787").replace(/\/$/, "");
 const SERVICE_NAME = "Babelfish_온디멘드 컨시어지";
-const AI_NAME = "Babelfish";
-const FIRST_MESSAGE = "안녕하세요, Babelfish입니다. 제휴 서비스와 연결해 실행까지 도와드리겠습니다. 원하시는 내용을 말씀해 주세요.";
+const DISPLAY_BRAND_NAME = "Babelfish";
+const SPOKEN_BRAND_NAME = "바벨피시";
+const AI_NAME = DISPLAY_BRAND_NAME;
+const FIRST_MESSAGE = `안녕하세요? 고객님의 비서 ${SPOKEN_BRAND_NAME} 입니다. 원하시는 서비스를 말씀해주세요.`;
+const API_REQUEST_TIMEOUT_MS = 10000;
+const FIXED_VOICE_STYLE_INSTRUCTIONS = [
+  "고정 음성 설정은 coral입니다.",
+  "현재 세션과 같은 밝고 차분한 젊은 여성 상담원 톤으로 말합니다.",
+  "말 속도와 높낮이를 매 응답 동일하게 유지하고, 문장 끝을 끝까지 완결합니다.",
+  "아래 문장을 자연스럽게 읽습니다."
+].join("\n");
 
 type AppStatus =
   | "AI READY"
@@ -60,9 +50,6 @@ type AppStatus =
   | "LISTENING"
   | "ANALYZING"
   | "BUILDING PLAN"
-  | "WAITING APPROVAL"
-  | "WAITING CONFIRMATION"
-  | "WAITING DETAIL"
   | "UNSUPPORTED LANGUAGE"
   | "NO SPEECH"
   | "UNCLEAR SPEECH"
@@ -82,16 +69,11 @@ type ServiceStatus =
   | "listening"
   | "analyzing"
   | "checking"
-  | "dispatch_checking"
-  | "reservation_checking"
-  | "processing"
-  | "waiting_confirmation"
-  | "waiting_detail"
-  | "ready_for_approval"
   | "submitted"
   | "completed"
   | "standby"
-  | "feedback_pending";
+  | "feedback_pending"
+  | "operator_transfer";
 
 type DemoPhase =
   | "idle"
@@ -100,6 +82,8 @@ type DemoPhase =
   | "confirming"
   | "checking"
   | "completed";
+
+type DemoConfirmationStep = "content" | "proceed";
 
 type DemoServiceType =
   | "taxi"
@@ -135,17 +119,27 @@ type DemoService = {
   slots: DemoSlots;
 };
 
-type PendingSlotConfirmation = {
-  slots: ServiceSlots;
-  question: string;
-  summary: string;
-};
-
 type CompletedService = {
   id: string;
   serviceType: string;
   summary: string;
   orderId: string;
+};
+
+type OperatorTransferUrgency = "P1" | "P2" | "P3";
+
+type OperatorTransferContext = {
+  reason: string;
+  failureReason: string;
+  urgency: OperatorTransferUrgency;
+  rawTranscript: string;
+  activeService: DemoService | null;
+  analysis: ConciergeAnalysis;
+  slots: ServiceSlots;
+  serviceStatus: ServiceStatus;
+  demoPhase: DemoPhase;
+  timestamp: string;
+  errorMessage?: string;
 };
 
 function makeId() {
@@ -160,9 +154,6 @@ const appStatusLabels: Record<AppStatus, string> = {
   LISTENING: "듣는 중",
   ANALYZING: "분석 중",
   "BUILDING PLAN": "실행안 생성 중",
-  "WAITING APPROVAL": "승인 대기",
-  "WAITING CONFIRMATION": "확인 대기",
-  "WAITING DETAIL": "추가 정보 대기",
   "UNSUPPORTED LANGUAGE": "언어 확인 필요",
   "NO SPEECH": "말씀 미확인",
   "UNCLEAR SPEECH": "말씀 확인 필요",
@@ -200,16 +191,11 @@ export default function Home() {
   const [assistHint, setAssistHint] = useState("기본은 자동으로 듣습니다. 인식이 안 될 때만 버튼을 눌러 다시 말씀해 주세요.");
   const [understoodText, setUnderstoodText] = useState("");
   const [finalSummary, setFinalSummary] = useState("");
-  const [approvalReady, setApprovalReady] = useState(false);
-  const [approvalBlockReason, setApprovalBlockReason] = useState("고객 요청 확인이 필요합니다.");
   const [serviceStatus, setServiceStatusState] = useState<ServiceStatus>("idle");
   const [demoPhase, setDemoPhaseState] = useState<DemoPhase>("idle");
   const [confirmedSlots, setConfirmedSlots] = useState<ServiceSlots>({});
-  const [pendingSlotSummary, setPendingSlotSummary] = useState("");
   const [lastCompletedService, setLastCompletedService] = useState<CompletedService | null>(null);
   const [satisfactionState, setSatisfactionState] = useState("확인 전");
-  const [feedbackNotes, setFeedbackNotes] = useState<string[]>([]);
-  const [serviceRules, setServiceRules] = useState<string[]>([]);
   const [demoCompletionHint, setDemoCompletionHint] = useState("");
   const [isWaitingDemoCompletion, setIsWaitingDemoCompletion] = useState(false);
   const [completedServices, setCompletedServices] = useState<CompletedService[]>([]);
@@ -234,6 +220,8 @@ export default function Home() {
   const completionTimerServiceIdRef = useRef<string | null>(null);
   const guaranteedAssistantMessageQueueRef = useRef<Array<{ message: string; analysis: ConciergeAnalysis | null }>>([]);
   const checkingReminderSentRef = useRef(false);
+  const operatorTransferTriggeredRef = useRef(false);
+  const stopCallAfterEndMessageRef = useRef(false);
   const pendingAnalysisRef = useRef<ConciergeAnalysis | null>(null);
   const lastAssistantTextRef = useRef("");
   const lastAssistantResponseMessageRef = useRef("");
@@ -257,8 +245,6 @@ export default function Home() {
   const userSpeakingRef = useRef(false);
   const isListeningEnabledRef = useRef(false);
   const isManualModeRef = useRef(false);
-  const waitingForConfirmationRef = useRef(false);
-  const waitingForDetailRef = useRef(false);
   const confirmedAnalysisRef = useRef<ConciergeAnalysis | null>(null);
   const detailNotesRef = useRef<string[]>([]);
   const remainingFieldsRef = useRef<string[]>([]);
@@ -275,14 +261,9 @@ export default function Home() {
   const serviceStatusRef = useRef<ServiceStatus>("idle");
   const demoPhaseRef = useRef<DemoPhase>("idle");
   const activeDemoServiceRef = useRef<DemoService | null>(null);
+  const demoConfirmationStepRef = useRef<DemoConfirmationStep>("content");
   const confirmedSlotsRef = useRef<ServiceSlots>({});
-  const pendingSlotConfirmationRef = useRef<PendingSlotConfirmation | null>(null);
-  const waitingForAdditionalRequestRef = useRef(false);
-  const waitingForSatisfactionRef = useRef(false);
-  const waitingForFeedbackRef = useRef(false);
   const lastCompletedServiceRef = useRef<CompletedService | null>(null);
-  const lastSubmittedServiceRef = useRef<CompletedService | null>(null);
-  const pendingImprovementRef = useRef("");
 
   const sortedLogs = useMemo(() => logs.slice(-14), [logs]);
 
@@ -312,233 +293,57 @@ export default function Home() {
     setConfirmedSlots(confirmedSlotsRef.current);
   }
 
-  function updateAnalysis(nextTranscript: string) {
-    const next = analyzeRequest(nextTranscript);
-    setAnalysis(next);
-    setStatus(next.escalationRequired ? "operator_transfer" : next.needsConfirmation ? "waiting_confirmation" : "draft");
-    updateAppStatus(next.escalationRequired ? "WAITING APPROVAL" : next.needsConfirmation ? "WAITING CONFIRMATION" : next.requiredInfo.length > 0 ? "WAITING DETAIL" : "BUILDING PLAN");
-    return next;
-  }
-
-  function getSlotLabel(key: keyof ServiceSlots) {
-    const labels: Record<string, string> = {
-      origin: "출발지",
-      destination: "도착지",
-      placeName: "장소명",
-      appointmentPlace: "예약 장소",
-      serviceLocation: "서비스 지역",
-      appointmentDateTime: "예약 일시",
-      callTiming: "호출 방식",
-      quantity: "수량",
-      deliveryAddress: "배송지",
-      vehicleInfo: "차량 정보",
-      vehicleSymptom: "차량 증상",
-      towingRequired: "탁송 여부",
-      providerName: "고객 지정 업체",
-      productName: "상품명",
-      patientInfo: "이용자 정보",
-      contactInfo: "연락처",
-      improvementTarget: "개선 요청"
-    };
-    return labels[key] ?? key;
-  }
-
-  function formatSlots(slots: ServiceSlots) {
-    return Object.entries(slots)
-      .filter(([, value]) => Boolean(value))
-      .map(([key, value]) => `${getSlotLabel(key as keyof ServiceSlots)}는 ${value}`)
-      .join(", ");
-  }
-
-  function mergeAnalysisSlots(analysisValue: ConciergeAnalysis) {
-    if (Object.keys(analysisValue.slots).length > 0) updateSlots(analysisValue.slots);
-  }
-
-  function getMissingFields(analysisValue = confirmedAnalysisRef.current ?? analysis, slots = confirmedSlotsRef.current) {
-    if (analysisValue.serviceType === "taxi") {
-      const missing = [];
-      if (!slots.origin) missing.push("출발지");
-      if (!slots.destination) missing.push("도착지");
-      return missing;
-    }
-    if (analysisValue.serviceType === "family_mobility") {
-      const missing = [];
-      if (!slots.origin) missing.push("출발지");
-      if (!slots.destination) missing.push("도착지");
-      if (!slots.patientInfo) missing.push("탑승자");
-      if (!slots.callTiming && !slots.appointmentDateTime) missing.push("이동 시간");
-      return missing;
-    }
-    if (analysisValue.serviceType === "hospital_reservation") {
-      const missing = [];
-      if (!slots.appointmentPlace && !slots.providerName && !slots.serviceLocation) missing.push("병원명 또는 진료 지역");
-      if (!slots.appointmentDateTime) missing.push("희망 일시");
-      return missing;
-    }
-    if (analysisValue.serviceType === "car_inspection") {
-      const missing = [];
-      if (!slots.vehicleInfo) missing.push("차량 정보");
-      if (!slots.appointmentDateTime) missing.push("희망 검사 일시");
-      if (!slots.serviceLocation && !slots.providerName) missing.push("검사 지역 또는 업체");
-      return missing;
-    }
-    if (analysisValue.serviceType === "car_maintenance") {
-      const missing = [];
-      if (!slots.vehicleSymptom) missing.push("차량 증상");
-      if (!slots.serviceLocation && !slots.providerName) missing.push("정비 지역 또는 업체");
-      if (!slots.appointmentDateTime) missing.push("희망 일시");
-      return missing;
-    }
-    if (analysisValue.serviceType === "car_accessory_installation") {
-      const missing = [];
-      if (!slots.vehicleInfo) missing.push("차량 종류");
-      if (!slots.serviceLocation && !slots.providerName) missing.push("시공 지역");
-      if (!slots.appointmentDateTime) missing.push("희망 날짜");
-      return missing;
-    }
-    if (analysisValue.serviceType === "product_purchase") {
-      const missing = [];
-      if (!slots.productName) missing.push("상품명");
-      if (!slots.quantity) missing.push("수량");
-      if (!slots.deliveryAddress) missing.push("배송지");
-      return missing;
-    }
-    if (analysisValue.serviceType === "service_improvement_command") return ["개선 반영 확인"];
-    return analysisValue.requiredInfo;
-  }
-
-  function buildInitialConfirmation(analysisValue: ConciergeAnalysis) {
-    if (analysisValue.serviceType === "taxi" && analysisValue.preferredProvider && analysisValue.preferredProvider !== "아이나비 M 택시") {
-      return "Babelfish 기본 제휴 호출은 아이나비 M 택시입니다. 아이나비 M 택시는 온디멘드 서비스와 연계되어 이동 확인까지 도와드릴 수 있습니다. 그래도 다른 택시 호출을 원하시나요?";
-    }
-    if (analysisValue.serviceType === "product_purchase" && analysisValue.preferredProvider && analysisValue.preferredProvider !== "Babelfish 제휴 협력사") {
-      return `Babelfish 제휴 협력사를 이용하면 가격과 리뷰를 비교해 추천드릴 수 있습니다. 그래도 ${analysisValue.preferredProvider}으로 진행할까요?`;
-    }
-    if (analysisValue.serviceType === "taxi") return buildProviderFirstReply(analysisValue, "출발지와 도착지를 말씀해 주세요.");
-    if (analysisValue.serviceType === "hospital_reservation") return buildProviderFirstReply(analysisValue, "원하시는 진료과와 지역을 말씀해 주세요.");
-    if (analysisValue.serviceType === "car_maintenance") return buildProviderFirstReply(analysisValue, "차량 증상과 원하시는 지역을 말씀해 주세요.");
-    if (analysisValue.serviceType === "car_inspection") return buildProviderFirstReply(analysisValue, "원하시는 검사 날짜와 지역을 말씀해 주세요.");
-    if (analysisValue.serviceType === "car_accessory_installation") return buildProviderFirstReply(analysisValue, "차량 종류와 원하시는 시공 지역을 말씀해 주세요.");
-    if (analysisValue.serviceType === "product_purchase") return buildProviderFirstReply(analysisValue, "상품명과 수량을 말씀해 주세요.");
-    if (analysisValue.serviceType === "service_improvement_command") return `서비스 시나리오 개선 요청으로 이해했습니다. "${analysisValue.rawText}" 내용을 반영하면 될까요?`;
-    return analysisValue.confirmationQuestion;
-  }
-
-  function getVisiblePartnerNames(analysisValue: ConciergeAnalysis, limit = 3) {
-    return policyGetVisiblePartnerNames(analysisValue, limit);
-  }
-
-  function joinKoreanList(items: string[]) {
-    return policyJoinKoreanList(items);
-  }
-
-  function buildPartnerVoiceSummary(analysisValue: ConciergeAnalysis) {
-    return policyBuildPartnerVoiceSummary(analysisValue);
-  }
-
-  function buildProviderFirstReply(analysisValue: ConciergeAnalysis, nextQuestion: string) {
-    return policyBuildProviderFirstReply(analysisValue, nextQuestion);
-  }
-
-  function buildPartnerRefusalReply(analysisValue: ConciergeAnalysis) {
-    return policyBuildPartnerRefusalReply(analysisValue);
-  }
-
   function ensureProviderMention(message: string, analysisValue?: ConciergeAnalysis | null) {
     return policyEnsureProviderMention(message, analysisValue);
   }
 
   function buildNextDetailQuestion(analysisValue: ConciergeAnalysis, field: string) {
     if (analysisValue.serviceType === "taxi") return `${field}를 말씀해 주세요.`;
-    if (analysisValue.serviceType === "hospital_reservation" && field.includes("병원")) return "Babelfish 제휴 병원 확인을 위해 원하시는 진료과와 지역을 말씀해 주세요.";
+    if (analysisValue.serviceType === "hospital_reservation" && field.includes("병원")) return `${SPOKEN_BRAND_NAME} 제휴 병원 확인을 위해 원하시는 진료과와 지역을 말씀해 주세요.`;
     if (analysisValue.serviceType === "car_accessory_installation" && field === "차량 종류") return "시공할 차량 종류를 말씀해 주세요.";
     if (analysisValue.serviceType === "car_accessory_installation" && field === "시공 지역") return "원하시는 시공 지역을 말씀해 주세요.";
     return `${field}를 말씀해 주세요.`;
   }
 
-  function askNextDetail(analysisValue: ConciergeAnalysis) {
-    const missing = getMissingFields(analysisValue);
-    remainingFieldsRef.current = missing;
-    if (missing.length === 0) {
-      if (analysisValue.serviceType === "service_improvement_command") {
-        const rule = confirmedSlotsRef.current.improvementTarget || analysisValue.rawText;
-        setServiceRules((current) => Array.from(new Set([...current, rule])));
-        setServiceStatus("listening");
-        setStatus("draft");
-        setFinalSummary(`개선 요청 반영 완료: ${rule}`);
-        setUnderstoodText(`서비스 시나리오 개선 요청을 반영했습니다.`);
-        setApprovalReady(false);
-        setApprovalBlockReason("새 서비스 요청을 기다리고 있습니다.");
-        scheduleAssistantResponse("반영했습니다. 다음 시나리오부터 해당 내용을 우선 적용하겠습니다. 추가로 필요한 서비스를 말씀해 주세요.");
-        return;
-      }
-      const summary = buildFinalSummary(analysisValue);
-      setFinalSummary(summary);
-      setUnderstoodText(summary);
-      setApprovalReady(false);
-      setApprovalBlockReason("데모 확인 중입니다.");
-      enterCheckingStateFromConfirmation(analysisValue);
-      return;
-    }
-    waitingForDetailRef.current = true;
-    setApprovalReady(false);
-    setApprovalBlockReason(missing[0]);
-    setServiceStatus("waiting_detail");
-    setStatus("waiting_detail");
-    updateAppStatus("WAITING DETAIL");
-    const question = buildNextDetailQuestion(analysisValue, missing[0]);
-    setAssistHint(question);
-    scheduleAssistantResponse(question, 0, analysisValue);
-  }
-
-  function buildFinalSummary(analysisValue: ConciergeAnalysis) {
-    const slotSummary = formatSlots(confirmedSlotsRef.current);
-    if (analysisValue.serviceType === "taxi") return `${slotSummary || "택시 호출 정보"}로 아이나비 M 택시 연결을 진행하는 것으로 최종 확인했습니다.`;
-    if (analysisValue.serviceType === "service_improvement_command") return `서비스 개선 요청을 반영하는 것으로 최종 확인했습니다. ${slotSummary}`;
-    return `${analysisValue.interpretedText}${slotSummary ? ` / ${slotSummary}` : ""}으로 최종 확인했습니다.`;
-  }
-
-  function buildCompletionMessage(analysisValue: ConciergeAnalysis, summary: string) {
-    if (analysisValue.serviceType === "taxi") return `아이나비 M 택시 호출 요청이 접수되었습니다. ${formatSlots(confirmedSlotsRef.current) || summary}로 확인했습니다. 추가로 도와드릴 내용이 있으실까요?`;
-    if (analysisValue.serviceType === "hospital_reservation") return "병원 예약 요청이 접수되었습니다. 제휴 병원 또는 고객 지정 병원의 예약 가능 여부를 확인한 뒤 안내드리겠습니다. 추가로 필요한 서비스가 있으실까요?";
-    if (analysisValue.serviceType === "product_purchase") return "상품 구매 요청이 접수되었습니다. 가격과 리뷰 기준으로 비교 후 협력사 구매 가능 여부를 확인하겠습니다. 추가로 구매하실 상품이 있으실까요?";
-    if (analysisValue.serviceType === "car_inspection") return "자동차 검사 예약 요청이 접수되었습니다. 연계 검사소의 예약 가능 여부를 확인하겠습니다. 추가로 탁송이나 정비도 필요하실까요?";
-    if (analysisValue.serviceType === "car_maintenance") return "자동차 정비 요청이 접수되었습니다. 가격과 평판 기준으로 연계 정비소를 확인하겠습니다. 추가로 확인하실 차량 관리 항목이 있으실까요?";
-    if (analysisValue.serviceType === "car_accessory_installation") return buildDemoSuccessMessage(analysisValue);
-    if (analysisValue.serviceType === "family_mobility") return "가족 이동 지원 요청이 접수되었습니다. 택시 또는 기사 연결 상태를 안내드리겠습니다. 추가로 필요한 이동이 있으실까요?";
-    return `요청이 접수되었습니다. ${summary} 추가로 도와드릴 내용이 있으실까요?`;
-  }
-
-  function buildSubmittedMessage(analysisValue: ConciergeAnalysis) {
-    return policyBuildSubmittedMessage(analysisValue);
-  }
-
-  function buildDemoSuccessMessage(analysisValue: ConciergeAnalysis) {
-    return policyBuildDemoSuccessMessage(analysisValue);
-  }
-
   function normalizeDemoText(text: string) {
-    return text.trim().toLowerCase().replace(/[.,!?。？！]/g, "").replace(/\s+/g, " ");
+    return text.trim().toLowerCase().replace(/[.,!?。？！~～]/g, "").replace(/\s+/g, " ");
+  }
+
+  function toSpokenBrandName(message: string) {
+    return message.replaceAll(DISPLAY_BRAND_NAME, SPOKEN_BRAND_NAME);
+  }
+
+  function buildFixedVoiceInstructions(message: string) {
+    return `${FIXED_VOICE_STYLE_INSTRUCTIONS}\n\n${message}`;
   }
 
   function isDemoPositiveIntent(text: string) {
     const normalized = normalizeDemoText(text);
-    return /^(네|예|응|맞아|맞아요|확인|확인했습니다|진행해줘|진행해 주세요|해주세요|해 주세요|좋아|좋습니다)$/.test(normalized);
+    if (!normalized) return false;
+    if (isDemoRestartIntent(normalized)) return false;
+
+    return /(네|네네|넵|예|예예|응|응응|어|어어|ㅇㅇ|맞아|맞아요|맞습니다|확인|확인했습니다|그래|그래요|그럼|좋아|좋아요|좋습니다|오케이|ok|알겠어|알겠어요|알겠습니다|진행|진행해|진행해줘|진행해 주세요|해줘|해주세요|해 주세요|예약해줘|예약해 주세요|예약 진행|호출해줘|호출해 주세요|접수해줘|접수해 주세요|알려줘|알려 주세요|확인해줘|확인해 주세요|그걸로|그걸로 해줘|그렇게|그렇게 해줘)/i.test(normalized);
   }
 
   function isDemoRestartIntent(text: string) {
     const normalized = normalizeDemoText(text);
-    return /^(아니|아니요|다시|다시 해줘|아니 다시|아니 다시 해줘|처음부터|취소|재시작|다시 말할게)$/.test(normalized);
+    return /(아니|아니요|아냐|노|no|싫어|싫다|취소|다시|다시 해줘|처음부터|변경|수정|그건 아니야)/i.test(normalized);
   }
 
   function isDemoEndIntent(text: string) {
     const normalized = normalizeDemoText(text);
-    return /^(종료|끝|없어|없습니다|괜찮아|괜찮습니다|그만)$/.test(normalized);
+    return /^(종료|서비스 종료|끝|없어|없습니다|괜찮아|괜찮습니다|그만)$/.test(normalized);
+  }
+
+  function isDemoCompletedCloseIntent(text: string) {
+    const normalized = normalizeDemoText(text);
+    if (isDemoEndIntent(text) || isDemoPositiveIntent(text)) return true;
+    return /^(고마워|고맙습니다|감사|감사합니다|알겠어|알겠습니다|확인했어|확인했습니다|됐어|됐습니다|수고했어|수고하셨습니다)$/.test(normalized);
   }
 
   function isDemoForbiddenSlotUtterance(text: string) {
     const normalized = normalizeDemoText(text);
-    return /^(다시|다시 해줘|아니 다시|아니 다시 해줘|처음부터|취소|재시작|택시 불러줘|병원 예약해줘|해줘|불러줘|진행해줘|진행해 주세요|맞아|맞아요|네|예|응|아니|아니요)$/.test(normalized);
+    return /^(다시|다시 해줘|아니 다시|아니 다시 해줘|처음부터|취소|재시작|변경|수정|택시 불러줘|병원 예약해줘|해줘|불러줘|진행|진행해|진행해줘|진행해 주세요|예약해줘|호출해줘|접수해줘|맞아|맞아요|맞습니다|네|예|응|어|어어|ㅇㅇ|그래|그래요|그럼|좋아|좋아요|좋습니다|오케이|ok|아니|아니요|아냐|노|no|nope|싫어|싫다|그건 아니야)$/.test(normalized);
   }
 
   function isDemoPartnerRefusal(text: string) {
@@ -553,9 +358,17 @@ export default function Home() {
     return /틴팅|썬팅|선팅|칼트윈/.test(text);
   }
 
+  function hasDemoTaxiIntent(text: string) {
+    const normalized = normalizeDemoText(text);
+    const compact = normalized.replace(/\s+/g, "");
+    if (/택시|텍시|택씨|텍씨|첵시|첵씨|쵝시|췍시|아이나비m/.test(compact)) return true;
+    if (/(섹시|쎅시)/.test(compact) && /(불러|호출|잡아|불러줘|호출해줘)/.test(compact)) return true;
+    return false;
+  }
+
   function detectDemoServiceType(text: string): DemoServiceType {
     const normalized = normalizeDemoText(text);
-    if (/택시|아이나비\s*m|호출/.test(normalized)) return "taxi";
+    if (hasDemoTaxiIntent(normalized)) return "taxi";
     if (/병원|의원|진료|피부과|정형외과|내과|소아과/.test(normalized)) return "hospital_reservation";
     if (/검사소|자동차 검사|차 검사|검사 예약/.test(normalized)) return "car_inspection";
     if (/수리|정비|차량 as|자동차 as|엔진|타이어|오일|고장/.test(normalized)) return "car_maintenance";
@@ -588,21 +401,21 @@ export default function Home() {
 
   function stripDemoRequestWords(text: string) {
     return text
-      .replace(/(택시|아이나비\s*m\s*택시|불러줘|호출해줘|호출|병원\s*예약해줘|예약해줘|예약|블랙박스|블박|틴팅|썬팅|선팅|하고 싶어|달고 싶어|장착|시공|수리|정비|검사|사줘|구매해줘|구매|주문해줘|주문|해주세요|해줘|진행해줘)/g, " ")
+      .replace(/(택시|텍시|택씨|텍씨|첵시|첵씨|쵝시|췍시|아이나비\s*m\s*택시|불러줘|호출해줘|호출|병원\s*예약해줘|예약해줘|예약|블랙박스|블박|틴팅|썬팅|선팅|하고 싶어|달고 싶어|장착|시공|수리|정비|검사|사줘|구매해줘|구매|주문해줘|주문|해주세요|해줘|진행해줘)/g, " ")
       .replace(/\s+/g, " ")
       .trim();
   }
 
   function extractDemoDateTime(text: string) {
-    const dateMatch = text.match(/(오늘|내일|모레|이번 주|다음 주|다음주|오전|오후|저녁|점심|아침|\d{1,2}월\s*\d{1,2}일|\d{1,2}일|\d{1,2}시|[월화수목금토일]요일)(?:\s*(오전|오후|저녁|점심|아침)?\s*\d{1,2}시)?/);
+    const dateMatch = text.match(/(?:(오늘|내일|모레|이번 주|다음 주|다음주|[월화수목금토일]요일|\d{1,2}월\s*\d{1,2}일|\d{1,2}일)\s*)?(?:(오전|오후|저녁|점심|아침)\s*)?\d{1,2}시(?:\s*\d{1,2}분)?|(오늘|내일|모레|이번 주|다음 주|다음주|오전|오후|저녁|점심|아침|[월화수목금토일]요일|\d{1,2}월\s*\d{1,2}일|\d{1,2}일)/);
     return dateMatch?.[0]?.trim();
   }
 
   function extractDemoLocation(text: string) {
-    const region = regionKeywords.find((item) => text.includes(item));
-    if (region) return region;
     const station = text.match(/[가-힣A-Za-z0-9]+역/);
     if (station) return station[0];
+    const region = regionKeywords.find((item) => text.includes(item));
+    if (region) return region;
     const area = text.match(/[가-힣A-Za-z0-9]+(?:시|구|동|군|읍|면)/);
     return area?.[0];
   }
@@ -693,6 +506,54 @@ export default function Home() {
     syncDemoSlotsToLegacyState(service);
   }
 
+  function applyDemoDefaultsBeforeChecking(service: DemoService) {
+    if (service.serviceType === "hospital_reservation") {
+      mergeDemoSlots(service, {
+        departmentOrSymptom: service.slots.departmentOrSymptom || "일반 진료",
+        location: service.slots.location || (service.slots.providerName ? undefined : "고객 위치 인근"),
+        appointmentDateTime: service.slots.appointmentDateTime || "가장 빠른 가능 시간"
+      });
+      return;
+    }
+    if (service.serviceType === "car_maintenance") {
+      mergeDemoSlots(service, {
+        vehicleSymptom: service.slots.vehicleSymptom || "일반 점검",
+        location: service.slots.location || (service.slots.providerName ? undefined : "고객 위치 인근"),
+        appointmentDateTime: service.slots.appointmentDateTime || "가장 빠른 가능 시간"
+      });
+      return;
+    }
+    if (service.serviceType === "car_inspection") {
+      mergeDemoSlots(service, {
+        vehicleInfo: service.slots.vehicleInfo || "고객 차량",
+        location: service.slots.location || (service.slots.providerName ? undefined : "고객 위치 인근"),
+        appointmentDateTime: service.slots.appointmentDateTime || "가장 빠른 가능 시간"
+      });
+      return;
+    }
+    if (service.serviceType === "blackbox_installation" || service.serviceType === "tinting_installation") {
+      mergeDemoSlots(service, {
+        vehicleInfo: service.slots.vehicleInfo || "고객 차량",
+        location: service.slots.location || "고객 위치 인근",
+        appointmentDateTime: service.slots.appointmentDateTime || "가장 빠른 가능 시간"
+      });
+      return;
+    }
+    if (service.serviceType === "product_purchase") {
+      mergeDemoSlots(service, {
+        productName: service.slots.productName || "요청 상품",
+        quantity: service.slots.quantity || "1개"
+      });
+      return;
+    }
+    if (service.serviceType === "family_mobility") {
+      mergeDemoSlots(service, {
+        origin: service.slots.origin || "현재 위치",
+        destination: service.slots.destination || "요청 목적지"
+      });
+    }
+  }
+
   function getDemoMissingFields(service: DemoService) {
     const slots = service.slots;
     if (service.serviceType === "taxi") {
@@ -759,13 +620,13 @@ export default function Home() {
   function buildDemoProviderFirstMessage(service: DemoService) {
     if (service.slots.packageRequested) return "아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공으로 연결해드리겠습니다. 차량 종류와 시공 지역, 희망 일시를 말씀해 주세요.";
     if (service.serviceType === "taxi") return "아이나비 M 택시를 연결해드리겠습니다. 출발지와 도착지를 말씀해 주세요.";
-    if (service.serviceType === "hospital_reservation") return "Babelfish 제휴 병원을 먼저 연결해드리겠습니다. 진료과와 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "car_maintenance") return "Babelfish 제휴 자동차 서비스 업체를 먼저 연결해드리겠습니다. 차량 증상과 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "car_inspection") return "Babelfish 제휴 검사소를 먼저 연결해드리겠습니다. 차량 정보와 검사 지역, 희망 일시를 말씀해 주세요.";
+    if (service.serviceType === "hospital_reservation") return `${SPOKEN_BRAND_NAME} 제휴 병원을 먼저 연결해드리겠습니다. 진료과와 지역, 희망 일시를 말씀해 주세요.`;
+    if (service.serviceType === "car_maintenance") return `${SPOKEN_BRAND_NAME} 제휴 자동차 서비스 업체를 먼저 연결해드리겠습니다. 차량 증상과 지역, 희망 일시를 말씀해 주세요.`;
+    if (service.serviceType === "car_inspection") return `${SPOKEN_BRAND_NAME} 제휴 검사소를 먼저 연결해드리겠습니다. 차량 정보와 검사 지역, 희망 일시를 말씀해 주세요.`;
     if (service.serviceType === "blackbox_installation") return "아이나비 블랙박스 장착 서비스로 연결해드리겠습니다. 차량 종류와 시공 지역, 희망 일시를 말씀해 주세요.";
     if (service.serviceType === "tinting_installation") return "칼트윈 틴팅 필름 시공으로 연결해드리겠습니다. 차량 종류와 시공 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "product_purchase") return "Babelfish 제휴 협력사를 통해 가격과 리뷰를 비교해 구매까지 연결해드리겠습니다. 상품명과 수량을 말씀해 주세요.";
-    if (service.serviceType === "family_mobility") return "Babelfish 제휴 이동 서비스를 먼저 연결해드리겠습니다. 출발지와 도착지를 말씀해 주세요.";
+    if (service.serviceType === "product_purchase") return `${SPOKEN_BRAND_NAME} 제휴 협력사를 통해 가격과 리뷰를 비교해 구매까지 연결해드리겠습니다. 상품명과 수량을 말씀해 주세요.`;
+    if (service.serviceType === "family_mobility") return `${SPOKEN_BRAND_NAME} 제휴 이동 서비스를 먼저 연결해드리겠습니다. 출발지와 도착지를 말씀해 주세요.`;
     return "원하시는 서비스를 다시 말씀해 주세요.";
   }
 
@@ -778,64 +639,125 @@ export default function Home() {
     const missing = getDemoMissingFields(service);
     if (missing.length === 0) return buildDemoConfirmationMessage(service);
     if (service.serviceType === "taxi") return "아이나비 M 택시 연결을 위해 출발지와 도착지를 말씀해 주세요.";
-    if (service.serviceType === "hospital_reservation") return "Babelfish 제휴 병원 확인을 위해 진료과와 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "car_maintenance") return "Babelfish 제휴 자동차 서비스 업체 확인을 위해 차량 증상과 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "car_inspection") return "Babelfish 제휴 검사소 확인을 위해 차량 정보와 검사 지역, 희망 일시를 말씀해 주세요.";
+    if (service.serviceType === "hospital_reservation") return `${SPOKEN_BRAND_NAME} 제휴 병원 확인을 위해 진료과와 지역, 희망 일시를 말씀해 주세요.`;
+    if (service.serviceType === "car_maintenance") return `${SPOKEN_BRAND_NAME} 제휴 자동차 서비스 업체 확인을 위해 차량 증상과 지역, 희망 일시를 말씀해 주세요.`;
+    if (service.serviceType === "car_inspection") return `${SPOKEN_BRAND_NAME} 제휴 검사소 확인을 위해 차량 정보와 검사 지역, 희망 일시를 말씀해 주세요.`;
     if (service.serviceType === "blackbox_installation") return "아이나비 블랙박스 장착 확인을 위해 차량 종류와 시공 지역, 희망 일시를 말씀해 주세요.";
     if (service.serviceType === "tinting_installation") return "칼트윈 틴팅 필름 시공 확인을 위해 차량 종류와 시공 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "product_purchase") return "Babelfish 제휴 협력사 구매 연결을 위해 상품명과 수량을 말씀해 주세요.";
+    if (service.serviceType === "product_purchase") return `${SPOKEN_BRAND_NAME} 제휴 협력사 구매 연결을 위해 상품명과 수량을 말씀해 주세요.`;
     return `${missing.join(", ")}를 말씀해 주세요.`;
   }
 
-  function buildDemoConfirmationMessage(service: DemoService) {
+  function withDemoCustomerReadback(service: DemoService, message: string) {
+    const rawText = service.rawText.trim();
+    if (!rawText) return message;
+    return `고객님 말씀은 "${rawText}"입니다. ${message}`;
+  }
+
+  function buildDemoContentConfirmationMessage(service: DemoService) {
     const slots = service.slots;
-    if (service.serviceType === "taxi") return `출발지는 ${slots.origin}, 도착지는 ${slots.destination}으로 확인했습니다. 아이나비 M 택시 배차를 진행할까요?`;
-    if (service.serviceType === "hospital_reservation") return `${slots.location ?? slots.providerName} 지역 ${slots.departmentOrSymptom} 진료로 확인했습니다. Babelfish 제휴 병원 예약 가능 여부를 확인할까요?`;
-    if (service.serviceType === "car_maintenance") return `${slots.location ?? slots.providerName} 지역에서 ${slots.vehicleSymptom} 정비로 확인했습니다. Babelfish 제휴 자동차 서비스 업체 예약 가능 여부를 확인할까요?`;
-    if (service.serviceType === "car_inspection") return `${slots.vehicleInfo} 차량 검사를 ${slots.location ?? slots.providerName} 지역에서 진행하는 것으로 확인했습니다. Babelfish 제휴 검사소 예약 가능 여부를 확인할까요?`;
-    if (service.serviceType === "blackbox_installation" && service.slots.packageRequested) return `${slots.vehicleInfo} 차량의 아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공을 ${slots.location} 지역에서 진행하는 것으로 확인했습니다. 시공 가능 여부를 확인할까요?`;
-    if (service.serviceType === "blackbox_installation") return `${slots.vehicleInfo} 차량의 아이나비 블랙박스 장착을 ${slots.location} 지역에서 진행하는 것으로 확인했습니다. 시공 가능 여부를 확인할까요?`;
-    if (service.serviceType === "tinting_installation") return `${slots.vehicleInfo} 차량의 칼트윈 틴팅 필름 시공을 ${slots.location} 지역에서 진행하는 것으로 확인했습니다. 시공 가능 여부를 확인할까요?`;
-    if (service.serviceType === "product_purchase") return `${slots.productName} 구매 요청으로 확인했습니다. Babelfish 제휴 협력사 구매 가능 여부를 확인할까요?`;
-    if (service.serviceType === "family_mobility") return `출발지는 ${slots.origin}, 도착지는 ${slots.destination}으로 확인했습니다. Babelfish 제휴 이동 서비스 연결을 진행할까요?`;
-    return "요청하신 내용으로 제휴 서비스 연결을 진행할까요?";
+    const area = slots.location ?? slots.providerName;
+    let message = "요청하신 내용으로 확인했습니다. 맞으실까요?";
+    if (service.serviceType === "taxi") message = `출발지는 ${slots.origin}, 도착지는 ${slots.destination}으로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "hospital_reservation") message = `${area ? `${area} 지역 ` : ""}${slots.departmentOrSymptom} 진료를 ${slots.appointmentDateTime}로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "car_maintenance") message = `${area ? `${area} 지역에서 ` : ""}${slots.vehicleSymptom} 정비로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "car_inspection") message = `${slots.vehicleInfo} 차량 검사를 ${area ? `${area} 지역에서 ` : ""}진행하는 것으로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "blackbox_installation" && service.slots.packageRequested) message = `${slots.vehicleInfo} 차량의 아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공${area ? `을 ${area} 지역에서` : "을"} 진행하는 것으로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "blackbox_installation") message = `${slots.vehicleInfo} 차량의 아이나비 블랙박스 장착${area ? `을 ${area} 지역에서` : "을"} 진행하는 것으로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "tinting_installation") message = `${slots.vehicleInfo} 차량의 칼트윈 틴팅 필름 시공${area ? `을 ${area} 지역에서` : "을"} 진행하는 것으로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "product_purchase") message = `${slots.productName} 구매 요청으로 확인했습니다. 맞으실까요?`;
+    else if (service.serviceType === "family_mobility") message = `출발지는 ${slots.origin}, 도착지는 ${slots.destination}으로 확인했습니다. 맞으실까요?`;
+    return withDemoCustomerReadback(service, message);
+  }
+
+  function buildDemoProceedConfirmationMessage(service: DemoService) {
+    const slots = service.slots;
+    const area = slots.location ?? slots.providerName;
+    if (service.serviceType === "taxi") return `확인했습니다. 출발지는 ${slots.origin}, 도착지는 ${slots.destination}입니다. 아이나비 M 택시 배차를 진행할까요?`;
+    if (service.serviceType === "hospital_reservation") return `확인했습니다. ${area ? `${area} 지역 ` : ""}${slots.departmentOrSymptom} 진료를 ${slots.appointmentDateTime} 기준으로 정리했습니다. ${SPOKEN_BRAND_NAME} 제휴 병원 예약 가능 여부를 확인할까요?`;
+    if (service.serviceType === "car_maintenance") return `확인했습니다. ${area ? `${area} 지역에서 ` : ""}${slots.vehicleSymptom} 정비를 ${slots.appointmentDateTime} 기준으로 정리했습니다. ${SPOKEN_BRAND_NAME} 제휴 자동차 서비스 업체로 진행할까요?`;
+    if (service.serviceType === "car_inspection") return `확인했습니다. ${slots.vehicleInfo} 차량 검사를 ${area ? `${area} 지역에서 ` : ""}${slots.appointmentDateTime} 기준으로 정리했습니다. ${SPOKEN_BRAND_NAME} 제휴 검사소로 진행할까요?`;
+    if (service.serviceType === "blackbox_installation" && service.slots.packageRequested) return `확인했습니다. ${slots.vehicleInfo} 차량의 아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공을 ${area ? `${area} 지역에서 ` : ""}${slots.appointmentDateTime} 기준으로 진행할까요?`;
+    if (service.serviceType === "blackbox_installation") return `확인했습니다. ${slots.vehicleInfo} 차량의 아이나비 블랙박스 장착을 ${area ? `${area} 지역에서 ` : ""}${slots.appointmentDateTime} 기준으로 진행할까요?`;
+    if (service.serviceType === "tinting_installation") return `확인했습니다. ${slots.vehicleInfo} 차량의 칼트윈 틴팅 필름 시공을 ${area ? `${area} 지역에서 ` : ""}${slots.appointmentDateTime} 기준으로 진행할까요?`;
+    if (service.serviceType === "product_purchase") return `확인했습니다. ${slots.productName} 구매 요청을 ${slots.quantity ?? slots.deliveryAddress ?? "요청 조건"} 기준으로 정리했습니다. ${SPOKEN_BRAND_NAME} 제휴 협력사로 진행할까요?`;
+    if (service.serviceType === "family_mobility") return `확인했습니다. 출발지는 ${slots.origin}, 도착지는 ${slots.destination}입니다. ${SPOKEN_BRAND_NAME} 제휴 이동 서비스 연결을 진행할까요?`;
+    return "확인했습니다. 요청하신 내용으로 제휴 서비스 연결을 진행할까요?";
+  }
+
+  function buildDemoConfirmationMessage(service: DemoService) {
+    return demoConfirmationStepRef.current === "proceed" ? buildDemoProceedConfirmationMessage(service) : buildDemoContentConfirmationMessage(service);
   }
 
   function buildDemoCheckingMessage(service: DemoService) {
-    if (service.serviceType === "taxi") return "아이나비 M 택시 배차 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
-    if (service.serviceType === "hospital_reservation") return "Babelfish 제휴 병원 예약 가능 여부를 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
-    if (service.serviceType === "car_maintenance") return "Babelfish 제휴 자동차 서비스 업체 예약 가능 여부를 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
-    if (service.serviceType === "car_inspection") return "Babelfish 제휴 검사소 예약 가능 여부를 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
-    if (service.serviceType === "blackbox_installation") return service.slots.packageRequested ? "아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공 가능 여부를 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다." : "아이나비 블랙박스 장착 가능 여부를 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
-    if (service.serviceType === "tinting_installation") return "칼트윈 틴팅 필름 시공 가능 여부를 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
-    if (service.serviceType === "product_purchase") return "Babelfish 제휴 협력사 구매 가능 여부를 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
-    return "제휴사 확인 중입니다. 데모에서는 10초 안에 결과를 안내드리겠습니다.";
+    if (service.serviceType === "taxi") return "아이나비 M 택시 배차 확인 중입니다. 데모에서는 10초 이내 결과를 안내드리겠습니다.";
+    if (service.serviceType === "hospital_reservation") return `${SPOKEN_BRAND_NAME} 제휴 병원 예약을 진행하겠습니다. 데모에서는 10초 이내 예약 완료 결과를 안내드리겠습니다.`;
+    if (service.serviceType === "car_maintenance") return `${SPOKEN_BRAND_NAME} 제휴 자동차 서비스 업체 예약을 진행하겠습니다. 데모에서는 10초 이내 예약 완료 결과를 안내드리겠습니다.`;
+    if (service.serviceType === "car_inspection") return `${SPOKEN_BRAND_NAME} 제휴 검사소 예약을 진행하겠습니다. 데모에서는 10초 이내 예약 완료 결과를 안내드리겠습니다.`;
+    if (service.serviceType === "blackbox_installation") return service.slots.packageRequested ? "아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공 접수를 진행하겠습니다. 데모에서는 10초 이내 접수 완료 결과를 안내드리겠습니다." : "아이나비 블랙박스 장착 접수를 진행하겠습니다. 데모에서는 10초 이내 접수 완료 결과를 안내드리겠습니다.";
+    if (service.serviceType === "tinting_installation") return "칼트윈 틴팅 필름 시공 접수를 진행하겠습니다. 데모에서는 10초 이내 접수 완료 결과를 안내드리겠습니다.";
+    if (service.serviceType === "product_purchase") return `${SPOKEN_BRAND_NAME} 제휴 협력사를 통한 구매 요청을 진행하겠습니다. 데모에서는 10초 이내 구매 접수 완료 결과를 안내드리겠습니다.`;
+    if (service.serviceType === "family_mobility") return `${SPOKEN_BRAND_NAME} 가족 이동 서비스 연결을 진행하겠습니다. 데모에서는 10초 이내 연결 완료 결과를 안내드리겠습니다.`;
+    return `${SPOKEN_BRAND_NAME} 제휴 서비스 연결을 진행하겠습니다. 데모에서는 10초 이내 완료 결과를 안내드리겠습니다.`;
   }
 
-  function buildDemoSuccessMessageFromService(service: DemoService) {
+  function buildDemoSuccessMessage(service: DemoService) {
     if (service.serviceType === "taxi") return "아이나비 M 택시 배차가 완료되었습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
-    if (service.serviceType === "hospital_reservation") return "Babelfish 제휴 병원 예약 요청이 성공적으로 접수되었습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
-    if (service.serviceType === "car_maintenance") return "Babelfish 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
-    if (service.serviceType === "car_inspection") return "Babelfish 제휴 검사소 예약 요청이 성공적으로 접수되었습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
-    if (service.serviceType === "blackbox_installation") return service.slots.packageRequested ? "아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공 요청이 성공적으로 접수되었습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요." : "아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
-    if (service.serviceType === "tinting_installation") return "칼트윈 틴팅 필름 시공 요청이 성공적으로 접수되었습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
-    if (service.serviceType === "product_purchase") return "Babelfish 제휴 협력사를 통한 구매 요청이 성공적으로 접수되었습니다. 추가로 구매하실 상품이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
-    return "Babelfish 제휴 서비스 요청이 성공적으로 접수되었습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.";
+    if (service.serviceType === "hospital_reservation") return `${SPOKEN_BRAND_NAME} 제휴 병원 예약이 완료되었습니다. ${service.slots.departmentOrSymptom ?? "일반 진료"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 확정되었습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
+    if (service.serviceType === "car_maintenance") return `${SPOKEN_BRAND_NAME} 제휴 자동차 서비스 업체 예약이 완료되었습니다. ${service.slots.vehicleSymptom ?? "일반 점검"} 서비스로 접수되었습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
+    if (service.serviceType === "car_inspection") return `${SPOKEN_BRAND_NAME} 제휴 검사소 예약이 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"} 검사를 ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
+    if (service.serviceType === "blackbox_installation") return service.slots.packageRequested ? `아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공 접수가 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.` : `아이나비 블랙박스 장착 접수가 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
+    if (service.serviceType === "tinting_installation") return `칼트윈 틴팅 필름 시공 접수가 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. 추가로 필요한 서비스가 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
+    if (service.serviceType === "product_purchase") return `${SPOKEN_BRAND_NAME} 제휴 협력사를 통한 구매 요청 접수가 완료되었습니다. 상품은 ${service.slots.productName ?? "요청 상품"}, 수량은 ${service.slots.quantity ?? "1개"} 기준으로 접수했습니다. 추가로 구매하실 상품이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
+    if (service.serviceType === "family_mobility") return `${SPOKEN_BRAND_NAME} 가족 이동 서비스 연결이 완료되었습니다. 출발지는 ${service.slots.origin ?? "현재 위치"}, 도착지는 ${service.slots.destination ?? "요청 목적지"} 기준으로 접수했습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
+    return `${SPOKEN_BRAND_NAME} 제휴 서비스 연결이 완료되었습니다. 요청하신 내용 기준으로 접수했습니다. 추가로 도와드릴 내용이 있으실까요? 서비스 종료를 원하시면 종료라고 말씀해 주세요.`;
   }
 
   function buildDemoPartnerRefusalReply(service: DemoService) {
     if (service.serviceType === "taxi") return "알겠습니다. 기본 제휴 호출은 아이나비 M 택시입니다. 다른 호출 방식을 원하시면 말씀해 주세요.";
-    if (service.serviceType === "blackbox_installation") return "Babelfish에서는 아이나비 블랙박스를 기본으로 안내합니다. 다른 제품을 원하시면 제품명을 말씀해 주세요.";
-    if (service.serviceType === "tinting_installation") return "Babelfish에서는 칼트윈 틴팅 필름을 기본으로 안내합니다. 다른 필름을 원하시면 제품명을 말씀해 주세요.";
+    if (service.serviceType === "blackbox_installation") return `${SPOKEN_BRAND_NAME}에서는 아이나비 블랙박스를 기본으로 안내합니다. 다른 제품을 원하시면 제품명을 말씀해 주세요.`;
+    if (service.serviceType === "tinting_installation") return `${SPOKEN_BRAND_NAME}에서는 칼트윈 틴팅 필름을 기본으로 안내합니다. 다른 필름을 원하시면 제품명을 말씀해 주세요.`;
     return "알겠습니다. 원하시는 업체명과 지역을 말씀해 주세요.";
   }
 
+  function buildDemoUiSummary(service: DemoService) {
+    const slots = service.slots;
+    if (service.serviceType === "taxi") return `아이나비 M 택시 요청: ${slots.origin ?? "출발지 미확인"}에서 ${slots.destination ?? "도착지 미확인"}까지`;
+    if (service.serviceType === "hospital_reservation") return `Babelfish 제휴 병원 예약: ${slots.location ?? slots.providerName ?? "지역 미확인"} / ${slots.departmentOrSymptom ?? "진료과 미확인"} / ${slots.appointmentDateTime ?? "일시 미확인"}`;
+    if (service.serviceType === "car_maintenance") return `Babelfish 제휴 자동차 서비스 업체 예약: ${slots.vehicleSymptom ?? "차량 증상 미확인"} / ${slots.location ?? slots.providerName ?? "지역 미확인"} / ${slots.appointmentDateTime ?? "일시 미확인"}`;
+    if (service.serviceType === "car_inspection") return `Babelfish 제휴 검사소 예약: ${slots.vehicleInfo ?? "차량 정보 미확인"} / ${slots.location ?? slots.providerName ?? "검사 지역 미확인"} / ${slots.appointmentDateTime ?? "일시 미확인"}`;
+    if (service.serviceType === "blackbox_installation") return `${getDemoServiceLabel(service)} 시공: ${slots.vehicleInfo ?? "차량 종류 미확인"} / ${slots.location ?? "시공 지역 미확인"} / ${slots.appointmentDateTime ?? "일시 미확인"}`;
+    if (service.serviceType === "tinting_installation") return `칼트윈 틴팅 필름 시공: ${slots.vehicleInfo ?? "차량 종류 미확인"} / ${slots.location ?? "시공 지역 미확인"} / ${slots.appointmentDateTime ?? "일시 미확인"}`;
+    if (service.serviceType === "product_purchase") return `Babelfish 제휴 협력사 구매: ${slots.productName ?? "상품명 미확인"} / ${slots.quantity ?? slots.deliveryAddress ?? "수량 또는 배송지 미확인"}`;
+    if (service.serviceType === "family_mobility") return `Babelfish 가족 이동 서비스: ${slots.origin ?? "출발지 미확인"}에서 ${slots.destination ?? "도착지 미확인"}까지`;
+    return service.rawText || "Babelfish 제휴 서비스 요청";
+  }
+
+  function buildDemoExecutionPlan(service: DemoService) {
+    if (service.serviceType === "taxi") return ["출발지/도착지 확인", "아이나비 M 택시 배차 확인", "10초 이내 배차 완료 안내"];
+    if (service.serviceType === "hospital_reservation") return ["진료과/증상 확인", "지역 또는 병원 확인", "희망 일시 확인", "Babelfish 제휴 병원 예약 가능 여부 확인", "10초 이내 예약 접수 완료 안내"];
+    if (service.serviceType === "car_maintenance") return ["차량 증상 확인", "지역 또는 업체 확인", "희망 일시 확인", "10초 이내 예약 접수 완료 안내"];
+    if (service.serviceType === "car_inspection") return ["차량 정보 확인", "검사 지역 확인", "희망 일시 확인", "10초 이내 검사 예약 접수 완료 안내"];
+    if (service.serviceType === "blackbox_installation") return ["차량 종류 확인", "시공 지역 확인", "희망 일시 확인", "10초 이내 장착 접수 완료 안내"];
+    if (service.serviceType === "tinting_installation") return ["차량 종류 확인", "시공 지역 확인", "희망 일시 확인", "10초 이내 시공 접수 완료 안내"];
+    if (service.serviceType === "product_purchase") return ["상품명 확인", "수량 또는 배송지 확인", "10초 이내 구매 요청 접수 완료 안내"];
+    if (service.serviceType === "family_mobility") return ["출발지/도착지 확인", "Babelfish 가족 이동 서비스 연결 확인", "10초 이내 연결 요청 접수 완료 안내"];
+    return ["고객 요청 확인", "Babelfish 제휴 서비스 연결 확인", "10초 이내 연결 요청 접수 완료 안내"];
+  }
+
+  function buildDemoNextUiMessage(service: DemoService) {
+    if (demoPhaseRef.current === "confirming") return buildDemoConfirmationMessage(service);
+    if (demoPhaseRef.current === "checking") return buildDemoCheckingMessage(service);
+    if (demoPhaseRef.current === "completed") return "예약 완료 안내 후 고객의 마무리 답변을 기다립니다.";
+    return buildDemoMissingQuestion(service);
+  }
+
   function emitDemoAssistant(message: string, guaranteed = false) {
+    const spokenMessage = toSpokenBrandName(message);
     setAssistHint(message);
-    lastAssistantResponseMessageRef.current = message;
-    lastAssistantMessageAtRef.current = Date.now();
+    lastAssistantResponseMessageRef.current = spokenMessage;
     appendLog("assistant", message);
-    sendAssistantResponse(message, null, guaranteed);
+    sendRawAssistantResponse(spokenMessage, guaranteed);
   }
 
   function enterDemoCollecting(service: DemoService, message: string) {
@@ -844,81 +766,136 @@ export default function Home() {
     setServiceStatus("listening");
     setStatus("draft");
     updateAppStatus("LISTENING");
-    setApprovalReady(false);
-    setApprovalBlockReason("데모 엔진이 필수 정보를 수집 중입니다.");
+    lastValidUserTurnRef.current = "";
+    fallbackPromptCountRef.current = 0;
     remainingFieldsRef.current = getDemoMissingFields(service);
     setUnderstoodText(`${getDemoServiceLabel(service)} 요청`);
     setFinalSummary("");
     emitDemoAssistant(message);
   }
 
-  function enterDemoConfirming(service: DemoService) {
+  function enterDemoConfirming(service: DemoService, step: DemoConfirmationStep = "content") {
     activeDemoServiceRef.current = service;
     setDemoPhase("confirming");
     setServiceStatus("listening");
     setStatus("draft");
-    updateAppStatus("WAITING CONFIRMATION");
+    updateAppStatus("LISTENING");
+    lastValidUserTurnRef.current = "";
+    fallbackPromptCountRef.current = 0;
     remainingFieldsRef.current = [];
-    setApprovalReady(false);
-    setApprovalBlockReason("고객 음성 확인 후 바로 제휴사 확인으로 진행합니다.");
-    const message = buildDemoConfirmationMessage(service);
+    demoConfirmationStepRef.current = step;
+    const message = step === "proceed" ? buildDemoProceedConfirmationMessage(service) : buildDemoContentConfirmationMessage(service);
     setUnderstoodText(message);
     emitDemoAssistant(message);
   }
 
   function enterDemoChecking(service: DemoService) {
+    applyDemoDefaultsBeforeChecking(service);
     activeDemoServiceRef.current = service;
+    demoConfirmationStepRef.current = "content";
     setDemoPhase("checking");
     setServiceStatus("checking");
     setStatus("submitted");
     updateAppStatus("BUILDING PLAN");
     setMockOrderId(service.id);
-    setApprovalReady(false);
-    setApprovalBlockReason("제휴사 확인 중: 데모에서는 10초 안에 결과를 안내드립니다.");
     setSatisfactionState("제휴사 확인 중");
-    setDemoCompletionHint("데모에서는 10초 안에 결과를 안내드립니다.");
+    lastValidUserTurnRef.current = "";
+    fallbackPromptCountRef.current = 0;
+    const checkingMessage = buildDemoCheckingMessage(service);
+    setDemoCompletionHint(checkingMessage);
     setIsWaitingDemoCompletion(true);
     checkingReminderSentRef.current = false;
     console.log("[DEMO] enterChecking", { serviceId: service.id, serviceType: service.serviceType });
-    emitDemoAssistant(buildDemoCheckingMessage(service), true);
+    emitDemoAssistant(checkingMessage, true);
     startSuccessTimer(service);
   }
 
   function startSuccessTimer(service: DemoService) {
-    console.log("[DEMO] startSuccessTimer", { serviceId: service.id, serviceType: service.serviceType });
-    if (completionTimerRef.current && completionTimerServiceIdRef.current === service.id) return;
+    if (!service.id) return;
     if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
+    completionTimerRef.current = null;
     completionTimerServiceIdRef.current = service.id;
+    console.log("[DEMO] startSuccessTimer", { serviceId: service.id, serviceType: service.serviceType });
     completionTimerRef.current = window.setTimeout(() => {
       completeService(service);
     }, DEMO_SUCCESS_DELAY_MS);
+  }
+
+  function triggerOperatorTransfer(reason: string, context: Partial<OperatorTransferContext> = {}) {
+    const activeService = context.activeService ?? activeDemoServiceRef.current;
+    const payload: OperatorTransferContext = {
+      reason,
+      failureReason: context.failureReason ?? reason,
+      urgency: context.urgency ?? "P1",
+      rawTranscript: context.rawTranscript ?? transcriptRef.current,
+      activeService,
+      analysis: context.analysis ?? analysis,
+      slots: context.slots ?? confirmedSlotsRef.current,
+      serviceStatus: context.serviceStatus ?? serviceStatusRef.current,
+      demoPhase: context.demoPhase ?? demoPhaseRef.current,
+      timestamp: context.timestamp ?? new Date().toISOString(),
+      errorMessage: context.errorMessage
+    };
+
+    // 상담원이 같은 내용을 다시 묻지 않도록 이관 시점의 전체 맥락을 고정한다.
+    operatorTransferTriggeredRef.current = true;
+    setServiceStatus("operator_transfer");
+    setStatus("operator_transfer");
+    updateAppStatus("SERVER ERROR");
+    setSatisfactionState("시스템 장애 - 상담원 최우선 수기 접수 대기(Priority 1)");
+    setAssistHint("상담원에게 우선 이관합니다. 접수 맥락을 함께 전달했습니다.");
+    appendLog("event", `상담원 이관: ${payload.failureReason} / 긴급도 ${payload.urgency}`);
+    console.warn("[HANDOVER] operator transfer", payload);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("babelfish:operator-transfer", { detail: payload }));
+    }
+    return payload;
   }
 
   function completeService(service: DemoService) {
     console.log("[DEMO] completeService", { serviceId: service.id, serviceType: service.serviceType });
     completionTimerRef.current = null;
     completionTimerServiceIdRef.current = null;
+    const message = buildDemoSuccessMessage(service);
     setDemoPhase("completed");
     setServiceStatus("completed");
     setStatus("completed");
     setIsWaitingDemoCompletion(false);
-    setDemoCompletionHint("성공 처리 완료. 추가 요청을 확인하고 있습니다.");
+    setDemoCompletionHint(message);
+    setFinalSummary(message);
     const completed: CompletedService = {
       id: service.id,
       orderId: service.id,
       serviceType: getDemoServiceLabel(service),
-      summary: buildDemoSuccessMessageFromService(service)
+      summary: message
     };
     lastCompletedServiceRef.current = completed;
     setLastCompletedService(completed);
-    setCompletedServices((current) => [...current, completed]);
     setSatisfactionState("추가 요청 확인 중");
-    emitDemoAssistant(buildDemoSuccessMessageFromService(service), true);
+    setCompletedServices((current) => [completed, ...current]);
+    emitDemoAssistant(message, true);
   }
 
   function beginDemoService(text: string) {
     const service = makeDemoService(text);
+    if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
+    completionTimerRef.current = null;
+    completionTimerServiceIdRef.current = null;
+    checkingReminderSentRef.current = false;
+    operatorTransferTriggeredRef.current = false;
+    confirmedSlotsRef.current = {};
+    setConfirmedSlots({});
+    setFinalSummary("");
+    setDemoCompletionHint("");
+    setIsWaitingDemoCompletion(false);
+    setMockOrderId(null);
+    demoConfirmationStepRef.current = "content";
     if (service.serviceType === "unknown") {
+      activeDemoServiceRef.current = service;
+      setAnalysis(analyzeRequest(text));
+      setDemoPhase("collecting");
+      setServiceStatus("listening");
+      remainingFieldsRef.current = getDemoMissingFields(service);
       emitDemoAssistant("원하시는 서비스를 다시 말씀해 주세요. 택시, 병원 예약, 정비, 검사, 블랙박스, 틴팅, 상품 구매를 도와드릴 수 있습니다.");
       return;
     }
@@ -926,20 +903,20 @@ export default function Home() {
     setAnalysis(analyzed);
     pendingAnalysisRef.current = null;
     confirmedAnalysisRef.current = null;
-    waitingForConfirmationRef.current = false;
-    waitingForDetailRef.current = false;
-    pendingSlotConfirmationRef.current = null;
-    setPendingSlotSummary("");
     detailNotesRef.current = [];
     mergeDemoSlots(service, extractDemoSlots(text, service));
     const missing = getDemoMissingFields(service);
     remainingFieldsRef.current = missing;
     if (missing.length === 0) {
+      if (service.serviceType !== "taxi") {
+        enterDemoConfirming(service, "content");
+        return;
+      }
       const message = `${buildDemoProviderFirstMessage(service)} ${buildDemoConfirmationMessage(service)}`;
       setDemoPhase("confirming");
       setServiceStatus("listening");
       setStatus("draft");
-      updateAppStatus("WAITING CONFIRMATION");
+      updateAppStatus("LISTENING");
       setUnderstoodText(message);
       emitDemoAssistant(message);
       return;
@@ -952,7 +929,7 @@ export default function Home() {
       emitDemoAssistant(buildDemoPartnerRefusalReply(service));
       return;
     }
-    if (isDemoRestartIntent(text) || isSameDemoServiceRequest(text, service)) {
+    if (isDemoRestartIntent(text)) {
       service.slots = { callTiming: service.serviceType === "taxi" ? "즉시 호출" : undefined, packageRequested: service.slots.packageRequested };
       mergeDemoSlots(service, {});
       enterDemoCollecting(service, buildDemoRetryQuestion(service));
@@ -964,13 +941,34 @@ export default function Home() {
     }
     const slots = extractDemoSlots(text, service);
     if (Object.keys(slots).length === 0) {
+      if (service.serviceType !== "taxi" && isDemoPositiveIntent(text)) {
+        applyDemoDefaultsBeforeChecking(service);
+        enterDemoConfirming(service, "content");
+        return;
+      }
+      if (service.serviceType === "taxi" && isSameDemoServiceRequest(text, service)) {
+        service.slots = { callTiming: service.serviceType === "taxi" ? "즉시 호출" : undefined, packageRequested: service.slots.packageRequested };
+        mergeDemoSlots(service, {});
+        enterDemoCollecting(service, buildDemoRetryQuestion(service));
+        return;
+      }
       emitDemoAssistant(buildDemoMissingQuestion(service));
       return;
     }
+    service.rawText = text;
     mergeDemoSlots(service, slots);
+    if (service.serviceType === "hospital_reservation") {
+      applyDemoDefaultsBeforeChecking(service);
+      enterDemoConfirming(service, "content");
+      return;
+    }
     const missing = getDemoMissingFields(service);
     remainingFieldsRef.current = missing;
     if (missing.length === 0) {
+      if (service.serviceType !== "taxi") {
+        enterDemoConfirming(service, "content");
+        return;
+      }
       enterDemoConfirming(service);
       return;
     }
@@ -985,7 +983,8 @@ export default function Home() {
     updateAppStatus("AI READY");
     setVoiceState("대기 중");
     setMicrophoneEnabled(false, "auto");
-    emitDemoAssistant("서비스를 종료하겠습니다. 다시 이용하시려면 서비스 시작 버튼을 눌러 주세요.", true);
+    stopCallAfterEndMessageRef.current = true;
+    emitDemoAssistant("종료하겠습니다. 언제든지 필요하실 때 불러주세요. 이용해 주셔서 감사합니다.", true);
   }
 
   function handleDemoConversation(text: string) {
@@ -999,19 +998,28 @@ export default function Home() {
     }
 
     if (demoPhaseRef.current === "completed") {
-      if (isDemoEndIntent(text)) {
+      if (isDemoCompletedCloseIntent(text)) {
         finishDemoConversation();
         return;
       }
-      if (detectDemoServiceType(text) !== "unknown") {
-        beginDemoService(text);
-        return;
-      }
-      emitDemoAssistant("추가로 필요한 서비스를 말씀해 주세요. 서비스 종료를 원하시면 종료라고 말씀해 주세요.");
+      emitDemoAssistant("서비스가 완료되었습니다. 마무리하시려면 확인 또는 종료라고 말씀해 주세요.");
       return;
     }
 
     const active = activeDemoServiceRef.current;
+    if (active && demoPhaseRef.current === "confirming" && isDemoPositiveIntent(text)) {
+      if (demoConfirmationStepRef.current === "content") {
+        enterDemoConfirming(active, "proceed");
+        return;
+      }
+      enterDemoChecking(active);
+      return;
+    }
+    if (active && demoPhaseRef.current === "collecting" && active.serviceType !== "taxi" && isDemoPositiveIntent(text)) {
+      applyDemoDefaultsBeforeChecking(active);
+      enterDemoConfirming(active, "content");
+      return;
+    }
     const detected = detectDemoServiceType(text);
     if (!active || (detected !== "unknown" && !isSameDemoServiceRequest(text, active))) {
       beginDemoService(text);
@@ -1019,13 +1027,11 @@ export default function Home() {
     }
 
     if (demoPhaseRef.current === "confirming") {
-      if (isDemoPositiveIntent(text)) {
-        enterDemoChecking(active);
-        return;
-      }
+      const confirmingService = activeDemoServiceRef.current;
       if (isDemoRestartIntent(text)) {
         active.slots = { callTiming: active.serviceType === "taxi" ? "즉시 호출" : undefined, packageRequested: active.slots.packageRequested };
         mergeDemoSlots(active, {});
+        demoConfirmationStepRef.current = "content";
         enterDemoCollecting(active, buildDemoRetryQuestion(active));
         return;
       }
@@ -1033,89 +1039,16 @@ export default function Home() {
       return;
     }
 
+    if (demoPhaseRef.current === "collecting" && active.serviceType !== "taxi" && isDemoPositiveIntent(text)) {
+      applyDemoDefaultsBeforeChecking(active);
+      enterDemoConfirming(active, "content");
+      return;
+    }
+
     handleDemoCollecting(text, active);
   }
 
-  function buildSubmittedService(analysisValue: ConciergeAnalysis, id?: string): CompletedService {
-    const serviceId = id || `${analysisValue.serviceType}-${Date.now()}`;
-    return {
-      id: serviceId,
-      serviceType: analysisValue.interpretedText || analysisValue.serviceType,
-      summary: finalSummary || buildFinalSummary(analysisValue),
-      orderId: serviceId
-    };
-  }
-
-  function startDemoSuccessTimer(analysisValue: ConciergeAnalysis, submittedService: CompletedService) {
-    const serviceId = submittedService.id || submittedService.orderId || `${analysisValue.serviceType}-${Date.now()}`;
-    submittedService.id = serviceId;
-    submittedService.orderId = submittedService.orderId || serviceId;
-    console.log("[DEMO] startDemoSuccessTimer", { serviceId, serviceType: analysisValue.serviceType });
-    if (completionTimerRef.current && completionTimerServiceIdRef.current === serviceId) return;
-    if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
-    completionTimerServiceIdRef.current = serviceId;
-    setIsWaitingDemoCompletion(true);
-    setDemoCompletionHint(checkingHint());
-    completionTimerRef.current = window.setTimeout(() => {
-      completeDemoService(analysisValue, submittedService);
-    }, DEMO_SUCCESS_DELAY_MS);
-  }
-
-  function completeDemoService(analysisValue: ConciergeAnalysis, submittedService: CompletedService) {
-    console.log("[DEMO] completeDemoService", { serviceId: submittedService.id || submittedService.orderId, serviceType: analysisValue.serviceType });
-    completionTimerRef.current = null;
-    completionTimerServiceIdRef.current = null;
-    setIsWaitingDemoCompletion(false);
-    setDemoCompletionHint("성공 처리 완료. 추가 요청을 확인하고 있습니다.");
-    setStatus("completed");
-    setServiceStatus("completed");
-    lastCompletedServiceRef.current = submittedService;
-    setLastCompletedService(submittedService);
-    setCompletedServices((current) => [...current, submittedService]);
-    waitingForAdditionalRequestRef.current = true;
-    setSatisfactionState("추가 요청 확인 중");
-    const message = buildDemoSuccessMessage(analysisValue);
-    appendLog("assistant", message);
-    sendAssistantResponse(message, analysisValue, true);
-  }
-
-  function enterCheckingState(analysisValue: ConciergeAnalysis, submittedService: CompletedService, orderId: string) {
-    const serviceId = submittedService.id || submittedService.orderId || orderId || `${analysisValue.serviceType}-${Date.now()}`;
-    submittedService.id = serviceId;
-    submittedService.orderId = submittedService.orderId || serviceId;
-    if (analysisValue.serviceType === "taxi" && !confirmedSlotsRef.current.callTiming) updateSlots({ callTiming: "즉시 호출" });
-    console.log("[DEMO] enterCheckingState", { serviceId, serviceType: analysisValue.serviceType });
-    lastSubmittedServiceRef.current = submittedService;
-    waitingForAdditionalRequestRef.current = false;
-    waitingForConfirmationRef.current = false;
-    waitingForDetailRef.current = false;
-    pendingAnalysisRef.current = null;
-    pendingSlotConfirmationRef.current = null;
-    checkingReminderSentRef.current = false;
-    setStatus("submitted");
-    setServiceStatus("checking");
-    setMockOrderId(serviceId);
-    setApprovalReady(false);
-    setApprovalBlockReason("제휴사 확인 중: 데모에서는 10초 안에 결과를 안내드립니다.");
-    setSatisfactionState("제휴사 확인 중");
-    setDemoCompletionHint(checkingHint());
-    const submittedMessage = buildSubmittedMessage(analysisValue);
-    scheduleAssistantResponse(submittedMessage, 0, analysisValue);
-    startDemoSuccessTimer(analysisValue, submittedService);
-  }
-
-  function enterCheckingStateFromConfirmation(analysisValue: ConciergeAnalysis) {
-    const submittedService = buildSubmittedService(analysisValue);
-    enterCheckingState(analysisValue, submittedService, submittedService.orderId);
-  }
-
   function getOpeningGreetingMessage() {
-    const shouldAskSatisfaction = lastCompletedServiceRef.current && satisfactionState !== "만족 확인" && satisfactionState !== "개선 의견 접수";
-    if (shouldAskSatisfaction) {
-      waitingForSatisfactionRef.current = true;
-      setSatisfactionState("만족도 확인 중");
-      return "다시 호출해 주셔서 감사합니다. 이전에 접수한 서비스는 만족스러우셨나요?";
-    }
     return FIRST_MESSAGE;
   }
 
@@ -1149,7 +1082,7 @@ export default function Home() {
     setMicrophoneEnabled(false, "auto");
     updateAppStatus("GREETING");
     setVoiceState("AI 응답 중");
-    const greetingMessage = retryMessage ?? getOpeningGreetingMessage();
+    const greetingMessage = toSpokenBrandName(retryMessage ?? getOpeningGreetingMessage());
     expectedAssistantMessageRef.current = greetingMessage;
     lastAssistantResponseMessageRef.current = greetingMessage;
     lastAssistantMessageAtRef.current = Date.now();
@@ -1157,7 +1090,7 @@ export default function Home() {
     dc.send(JSON.stringify({
       type: "response.create",
       response: {
-        instructions: `다음 문장만 그대로 말하세요. 다른 설명은 덧붙이지 마세요.\n${greetingMessage}`
+        instructions: buildFixedVoiceInstructions(greetingMessage)
       }
     }));
     startGreetingWatchdog();
@@ -1176,7 +1109,7 @@ export default function Home() {
       setMicrophoneEnabled(false, "auto");
       if (greetingRetryCountRef.current < GREETING_MAX_RETRY) {
         greetingRetryCountRef.current += 1;
-        sendInitialGreetingOnce("다시 안내드리겠습니다. Babelfish입니다. 원하시는 서비스를 말씀해 주세요.");
+        sendInitialGreetingOnce(`다시 안내드리겠습니다. ${SPOKEN_BRAND_NAME}입니다. 원하시는 서비스를 말씀해 주세요.`);
         return;
       }
       markAssistantSpeakingEnd();
@@ -1207,12 +1140,25 @@ export default function Home() {
 
   function checkStuckState() {
     const now = Date.now();
+    if (demoPhaseRef.current === "checking") {
+      // 제휴사 확인 중에는 10초 데모 타이머만 신뢰한다.
+      // 2.5초 침묵 watchdog/fallback이 끼어들면 완료 멘트가 밀리므로 여기서 즉시 빠져나간다.
+      if (activeDemoServiceRef.current && !completionTimerRef.current) {
+        startSuccessTimer(activeDemoServiceRef.current);
+      }
+      return;
+    }
     if (isAssistantTurnActive() && lastAssistantStartedAtRef.current && now - lastAssistantStartedAtRef.current > AI_RESPONSE_STUCK_TIMEOUT_MS) {
       forceRecoverToListening("AI response stuck");
       return;
     }
     if (currentAppStatusRef.current === "ECHO GUARD" && now > assistantEchoGuardUntilRef.current + 500) {
       forceRecoverToListening("Echo guard stuck");
+      return;
+    }
+    if (demoPhaseRef.current === "collecting" || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed") {
+      // 데모 대화 중에는 과거 analysis 기반 fallback을 쓰지 않는다.
+      // 이전 택시 analysis가 병원/틴팅 흐름에 섞여 나오는 문제를 막는다.
       return;
     }
     if (lastValidUserTurnRef.current && fallbackPromptCountRef.current < MAX_FALLBACK_PROMPT_COUNT && !isAssistantTurnActive()) {
@@ -1226,11 +1172,6 @@ export default function Home() {
         scheduleAssistantResponse(fallback, 0, active.serviceType === "unknown" ? null : active);
       }
     }
-    if (demoPhaseRef.current === "checking" && activeDemoServiceRef.current && !completionTimerRef.current) {
-      startSuccessTimer(activeDemoServiceRef.current);
-    } else if (isDemoCheckingStatus() && lastSubmittedServiceRef.current && !completionTimerRef.current) {
-      startDemoSuccessTimer(confirmedAnalysisRef.current ?? analysis, lastSubmittedServiceRef.current);
-    }
   }
 
   function forceRecoverToListening(reason: string) {
@@ -1242,7 +1183,7 @@ export default function Home() {
     if (responseTimerRef.current) window.clearTimeout(responseTimerRef.current);
     responseTimerRef.current = null;
     assistantEchoGuardUntilRef.current = 0;
-    if (serviceStatusRef.current === "standby") {
+    if (demoPhaseRef.current === "idle") {
       setMicrophoneEnabled(false, "auto");
       updateAppStatus("AI READY");
       setVoiceState("대기 중");
@@ -1262,21 +1203,6 @@ export default function Home() {
     return stateBuildContextFallback(active);
   }
 
-  function setPendingSlotConfirmation(slots: ServiceSlots, customQuestion?: string) {
-    const summary = formatSlots(slots);
-    const placeQuestion = buildPlaceConfirmationQuestion(getPlaceCandidates(Object.values(slots).join(" ")));
-    const question = customQuestion ?? (summary ? `${summary}로 이해했습니다. 맞으실까요?` : placeQuestion);
-    pendingSlotConfirmationRef.current = { slots, question, summary };
-    setPendingSlotSummary(summary);
-    setUnderstoodText(summary || understoodText);
-    setApprovalReady(false);
-    setApprovalBlockReason("고객 확인이 필요합니다.");
-    setServiceStatus("waiting_confirmation");
-    updateAppStatus("WAITING CONFIRMATION");
-    appendLog("system", question);
-    scheduleAssistantResponse(question, 0, confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis);
-  }
-
   async function startCall() {
     setError(null);
     setConnection("마이크 권한 요청 중");
@@ -1288,18 +1214,11 @@ export default function Home() {
     transcriptRef.current = "";
     pendingAnalysisRef.current = null;
     confirmedAnalysisRef.current = null;
-    waitingForConfirmationRef.current = false;
-    waitingForDetailRef.current = false;
     detailNotesRef.current = [];
     remainingFieldsRef.current = [];
     confirmedSlotsRef.current = {};
     activeDemoServiceRef.current = null;
     setDemoPhase("greeting");
-    pendingSlotConfirmationRef.current = null;
-    waitingForAdditionalRequestRef.current = false;
-    waitingForSatisfactionRef.current = false;
-    waitingForFeedbackRef.current = false;
-    pendingImprovementRef.current = "";
     lastAssistantTextRef.current = "";
     lastAssistantResponseMessageRef.current = "";
     assistantRetryCountRef.current = 0;
@@ -1314,6 +1233,7 @@ export default function Home() {
     lastValidUserTurnRef.current = "";
     currentAppStatusRef.current = "CONNECTING";
     fallbackPromptCountRef.current = 0;
+    operatorTransferTriggeredRef.current = false;
     isAssistantSpeakingRef.current = false;
     isAssistantAudioPlayingRef.current = false;
     isResponseInProgressRef.current = false;
@@ -1339,16 +1259,13 @@ export default function Home() {
     setAssistHint("AI 첫 인사 후 자동으로 고객 말씀 대기 상태가 됩니다.");
     setUnderstoodText("");
     setFinalSummary("");
-    setApprovalReady(false);
-    setApprovalBlockReason("고객 요청 확인이 필요합니다.");
     setServiceStatus("listening");
     setConfirmedSlots({});
-    setPendingSlotSummary("");
     setDemoCompletionHint("");
     setIsWaitingDemoCompletion(false);
     if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
     completionTimerRef.current = null;
-    setSatisfactionState(lastCompletedServiceRef.current ? "재호출 시 확인 예정" : "확인 전");
+    setSatisfactionState("확인 전");
     greetingSentRef.current = false;
     hasSentGreetingRef.current = false;
     isGreetingInProgressRef.current = false;
@@ -1367,10 +1284,10 @@ export default function Home() {
     appendLog("system", "통화를 시작합니다. AI가 먼저 인사합니다.");
 
     try {
-      const healthResponse = await fetch(`${API_BASE}/health`);
+      const healthResponse = await fetchWithTimeout(`${API_BASE}/health`);
       if (!healthResponse.ok) throw new Error("서버 연결 실패: Express 서버 /health 확인에 실패했습니다.");
 
-      const tokenResponse = await fetch(`${API_BASE}/realtime/session`, { method: "POST" });
+      const tokenResponse = await fetchWithTimeout(`${API_BASE}/realtime/session`, { method: "POST" });
       if (!tokenResponse.ok) throw new Error(await formatApiError(tokenResponse));
       const tokenPayload = await tokenResponse.json();
       const ephemeralKey = tokenPayload.value ?? tokenPayload.client_secret?.value;
@@ -1418,7 +1335,7 @@ export default function Home() {
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
+      const sdpResponse = await fetchWithTimeout("https://api.openai.com/v1/realtime/calls", {
         method: "POST",
         body: offer.sdp,
         headers: {
@@ -1433,10 +1350,22 @@ export default function Home() {
       setVoiceState("대기 중");
     } catch (err) {
       const message = formatClientError(err);
+      const transferContext: Partial<OperatorTransferContext> = {
+        failureReason: "API 요청 실패 또는 타임아웃",
+        urgency: "P1",
+        rawTranscript: transcriptRef.current,
+        activeService: activeDemoServiceRef.current,
+        analysis,
+        slots: confirmedSlotsRef.current,
+        serviceStatus: serviceStatusRef.current,
+        demoPhase: demoPhaseRef.current,
+        errorMessage: message
+      };
       updateAppStatus("SERVER ERROR");
       setError(message);
       appendLog("system", message);
       stopCall(false);
+      triggerOperatorTransfer("API 요청 실패 또는 타임아웃", transferContext);
     }
   }
 
@@ -1462,8 +1391,10 @@ export default function Home() {
       return;
     }
     if (event.type === "conversation.item.input_audio_transcription.completed") {
-      if (isGreetingInProgressRef.current || isAssistantTurnActive() || isInsideAssistantEchoGuard()) return;
       const text = String(event.transcript ?? "");
+      const allowControlTranscript = isDemoControlTranscript(text);
+      if (isGreetingInProgressRef.current || isAssistantTurnActive()) return;
+      if (!allowControlTranscript && isInsideAssistantEchoGuard()) return;
       latestFinalTranscriptRef.current = text;
       if (!userSpeakingRef.current) scheduleUserTurnProcessing();
     }
@@ -1517,8 +1448,22 @@ export default function Home() {
       }
       markAssistantSpeakingEnd();
       flushGuaranteedAssistantMessage();
+      if (stopCallAfterEndMessageRef.current && guaranteedAssistantMessageQueueRef.current.length === 0) {
+        stopCallAfterEndMessageRef.current = false;
+        window.setTimeout(() => stopCall(true), 0);
+      }
     }
-    if (event.type === "error") console.warn(event.error?.message ?? "Realtime error");
+    if (event.type === "error") {
+      const errorMessage = event.error?.message ?? "Realtime error";
+      console.warn(errorMessage);
+      if (!operatorTransferTriggeredRef.current) {
+        triggerOperatorTransfer("Realtime 응답 오류", {
+          failureReason: "Realtime 응답 오류",
+          urgency: "P1",
+          errorMessage
+        });
+      }
+    }
   }
 
   function processCustomerTranscript(text: string) {
@@ -1538,19 +1483,27 @@ export default function Home() {
       return;
     }
 
-    if (isAssistantTurnActive() || isInsideAssistantEchoGuard() || (Date.now() - lastAssistantSpokeAtRef.current < ASSISTANT_ECHO_GUARD_MS && isAssistantEcho(trimmed, lastAssistantTextRef.current))) {
+    const isDemoControlCommand = isDemoControlTranscript(trimmed);
+
+    if (isAssistantTurnActive() && !isDemoControlCommand) {
+      console.debug("Ignored transcript while assistant is speaking", trimmed);
+      setVoiceState("AI 응답 중");
+      return;
+    }
+
+    if (!isDemoControlCommand && (isInsideAssistantEchoGuard() || (Date.now() - lastAssistantSpokeAtRef.current < ASSISTANT_ECHO_GUARD_MS && isAssistantEcho(trimmed, lastAssistantTextRef.current)))) {
       console.debug("Ignored possible assistant echo", trimmed);
       setVoiceState("에코 차단 중");
       return;
     }
 
     const normalized = trimmed.toLowerCase().replace(/\s+/g, " ");
-    if (lastAcceptedTranscriptRef.current === normalized && Date.now() - lastAcceptedAtRef.current < 3500) {
+    if (!isDemoControlCommand && lastAcceptedTranscriptRef.current === normalized && Date.now() - lastAcceptedAtRef.current < 3500) {
       console.debug("Ignored duplicated transcript", trimmed);
       setVoiceState("대기 중");
       return;
     }
-    if (lastProcessedTranscriptRef.current === normalized) {
+    if (!isDemoControlCommand && lastProcessedTranscriptRef.current === normalized) {
       console.debug("Ignored already processed transcript", trimmed);
       return;
     }
@@ -1575,237 +1528,6 @@ export default function Home() {
     unclearCountRef.current = 0;
     noiseCountRef.current = 0;
     handleDemoConversation(trimmed);
-    return;
-
-    if (serviceStatusRef.current === "standby") {
-      appendLog("system", "서비스 대기 중입니다. 서비스 시작 버튼을 눌러 다시 시작해 주세요.");
-      return;
-    }
-
-    if (isDemoCheckingStatus()) {
-      if (!checkingReminderSentRef.current) {
-        checkingReminderSentRef.current = true;
-        const active = confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis;
-        const message = "제휴사 확인 중입니다. 데모에서는 10초 안에 결과를 안내드립니다.";
-        appendLog("assistant", message);
-        sendAssistantResponse(message, active, true);
-      }
-      return;
-    }
-
-    if (waitingForConfirmationRef.current && pendingAnalysisRef.current && !hasConfirmationIntent(trimmed) && !isPartnerRefusal(trimmed) && !isNegativeConfirmation(trimmed)) {
-      const confirmed = pendingAnalysisRef.current!;
-      setAnalysis(confirmed);
-      confirmedAnalysisRef.current = confirmed;
-      pendingAnalysisRef.current = null;
-      waitingForConfirmationRef.current = false;
-      mergeAnalysisSlots(confirmed);
-      remainingFieldsRef.current = getMissingFields(confirmed);
-      waitingForDetailRef.current = remainingFieldsRef.current.length > 0;
-      setStatus("waiting_detail");
-      setServiceStatus("waiting_detail");
-      updateAppStatus("WAITING DETAIL");
-      handleDetailAnswer(trimmed);
-      return;
-    }
-
-    if (isContextualShortSlot(trimmed) && handleContextualShortSlot(trimmed)) {
-      return;
-    }
-
-    if (waitingForFeedbackRef.current) {
-      waitingForFeedbackRef.current = false;
-      setFeedbackNotes((current) => [...current, trimmed]);
-      setSatisfactionState("개선 의견 접수");
-      appendLog("system", "말씀 감사합니다. 개선 의견으로 기록하겠습니다. 추가로 필요한 서비스를 말씀해 주세요.");
-      scheduleAssistantResponse("말씀 감사합니다. 개선 의견으로 기록하겠습니다. 추가로 필요한 서비스를 말씀해 주세요.");
-      return;
-    }
-
-    if (waitingForSatisfactionRef.current) {
-      waitingForSatisfactionRef.current = false;
-      if (isNegativeConfirmation(trimmed) || /별로|불편|문제|싫|멀었/.test(trimmed)) {
-        waitingForFeedbackRef.current = true;
-        setServiceStatus("feedback_pending");
-        setSatisfactionState("불만족 사유 확인 중");
-        appendLog("system", "불편을 드려 죄송합니다. 어떤 부분이 불편하셨는지 말씀해 주세요.");
-        scheduleAssistantResponse("불편을 드려 죄송합니다. 어떤 부분이 불편하셨는지 말씀해 주세요.");
-        return;
-      }
-      setSatisfactionState("만족 확인");
-      appendLog("system", "감사합니다. 추가로 필요한 서비스를 말씀해 주세요.");
-      scheduleAssistantResponse("감사합니다. 추가로 필요한 서비스를 말씀해 주세요.");
-      return;
-    }
-
-    if (waitingForAdditionalRequestRef.current) {
-      if (isNegativeConfirmation(trimmed) || isEndOfServiceIntent(trimmed)) {
-        waitingForAdditionalRequestRef.current = false;
-        setServiceStatus("standby");
-        setStatus("standby");
-        updateAppStatus("AI READY");
-        setVoiceState("대기 중");
-        setMicrophoneEnabled(false, "auto");
-        appendLog("system", voiceEndMessage);
-        scheduleAssistantResponse(voiceEndMessage);
-        return;
-      }
-      waitingForAdditionalRequestRef.current = false;
-      resetPendingFlow();
-    }
-
-    if (pendingSlotConfirmationRef.current) {
-      if (isControlOrServiceRepeatUtterance(trimmed, confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis)) {
-        const active = confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis;
-        pendingSlotConfirmationRef.current = null;
-        setPendingSlotSummary("");
-        handleControlUtterance(active);
-        return;
-      }
-      if (hasConfirmationIntent(trimmed)) {
-        const pending = pendingSlotConfirmationRef.current!;
-        pendingSlotConfirmationRef.current = null;
-        updateSlots(pending.slots);
-        detailNotesRef.current = [...detailNotesRef.current, pending.summary];
-        setPendingSlotSummary("");
-        const active = confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis;
-        setUnderstoodText(`${active.interpretedText} / ${formatSlots(confirmedSlotsRef.current)}`);
-        appendLog("system", `${pending.summary}로 확인했습니다.`);
-        if (getMissingFields(active).length === 0) {
-          enterCheckingStateFromConfirmation(active);
-        } else {
-          askNextDetail(active);
-        }
-        return;
-      }
-      if (isNegativeConfirmation(trimmed)) {
-        const revisedSlots = extractCorrectedSlots(trimmed);
-        if (Object.keys(revisedSlots).length > 0) {
-          setPendingSlotConfirmation(revisedSlots);
-        } else {
-          const question = "알겠습니다. 해당 정보를 다시 말씀해 주세요.";
-          pendingSlotConfirmationRef.current = null;
-          setPendingSlotSummary("");
-          appendLog("system", question);
-          scheduleAssistantResponse(question);
-        }
-        return;
-      }
-    }
-
-    if (isControlOrServiceRepeatUtterance(trimmed, confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis) && hasActiveServiceContext()) {
-      handleControlUtterance(confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis);
-      return;
-    }
-
-    if (isPartnerRefusal(trimmed) && (pendingAnalysisRef.current || confirmedAnalysisRef.current)) {
-      const active = (pendingAnalysisRef.current ?? confirmedAnalysisRef.current ?? analysis)!;
-      confirmedAnalysisRef.current = active;
-      pendingAnalysisRef.current = null;
-      waitingForConfirmationRef.current = false;
-      waitingForDetailRef.current = true;
-      remainingFieldsRef.current =
-        active.serviceType === "taxi" ? ["다른 호출 방식"] :
-          active.serviceType === "car_accessory_installation" ? ["제품명"] :
-            ["고객 지정 업체"];
-      setStatus("waiting_detail");
-      setServiceStatus("waiting_detail");
-      updateAppStatus("WAITING DETAIL");
-      setApprovalReady(false);
-      setApprovalBlockReason("고객 지정 업체 또는 제품 확인이 필요합니다.");
-      const reply = buildPartnerRefusalReply(active);
-      appendLog("system", reply);
-      scheduleAssistantResponse(reply, 0, active);
-      return;
-    }
-
-    if (isNegativeConfirmation(trimmed) && pendingAnalysisRef.current) {
-      if (waitingForDetailRef.current && confirmedAnalysisRef.current) {
-        appendLog("system", "알겠습니다. 해당 정보를 다시 말씀해 주세요.");
-        scheduleAssistantResponse("알겠습니다. 해당 정보를 다시 말씀해 주세요.");
-      } else {
-        resetPendingFlow();
-        appendLog("system", "알겠습니다. 원하시는 내용을 다시 말씀해 주세요.");
-        scheduleAssistantResponse("알겠습니다. 원하시는 내용을 다시 말씀해 주세요.");
-      }
-      return;
-    }
-
-    if (hasConfirmationIntent(trimmed)) {
-      appendLog("system", "짧은 확인 말씀으로 판단해 요청 분석을 갱신하지 않았습니다.");
-      if (pendingAnalysisRef.current && waitingForConfirmationRef.current) {
-        const confirmed = pendingAnalysisRef.current!;
-        setAnalysis(confirmed);
-        confirmedAnalysisRef.current = confirmed;
-        waitingForConfirmationRef.current = false;
-        mergeAnalysisSlots(confirmed);
-        remainingFieldsRef.current = getMissingFields(confirmed);
-        waitingForDetailRef.current = remainingFieldsRef.current.length > 0;
-        setStatus("draft");
-      if (remainingFieldsRef.current.length > 0) {
-          askNextDetail(confirmed);
-        } else {
-          enterCheckingStateFromConfirmation(confirmed);
-        }
-      } else {
-        if (waitingForDetailRef.current && confirmedAnalysisRef.current) {
-          const field = remainingFieldsRef.current[0] ?? "추가 정보";
-          handleDetailAnswer(field === "개선 반영 확인" ? "반영 승인" : "지금 진행");
-        } else {
-          updateAppStatus("WAITING DETAIL");
-          scheduleAssistantResponse("원하시는 내용을 조금 더 구체적으로 말씀해 주시면 바로 확인해드리겠습니다.");
-        }
-      }
-      return;
-    }
-
-    if (waitingForDetailRef.current && confirmedAnalysisRef.current) {
-      handleDetailAnswer(trimmed);
-      return;
-    }
-
-    const analyzed = analyzeRequest(trimmed);
-    if (!analyzed.allowedLanguage) {
-      handleUnsupportedLanguage();
-      return;
-    }
-
-    if (isNoiseLikeTranscript(trimmed) || !isHumanSpeechCandidate(trimmed) || !isLikelyValidUserUtterance(trimmed, lastAssistantTextRef.current)) {
-      handleNoiseLikeTranscript(trimmed);
-      return;
-    }
-
-    const shouldAnalyze = hasRequestIntent(trimmed);
-    if (!shouldAnalyze || analyzed.serviceType === "unknown" || analyzed.confidence < 0.5) {
-      handleUnclearSpeech();
-      return;
-    }
-
-    noSpeechCountRef.current = 0;
-    unclearCountRef.current = 0;
-    noiseCountRef.current = 0;
-    lastAcceptedTranscriptRef.current = normalized;
-    lastAcceptedAtRef.current = Date.now();
-    lastProcessedTranscriptRef.current = normalized;
-    pendingAnalysisRef.current = analyzed;
-    confirmedAnalysisRef.current = null;
-    waitingForConfirmationRef.current = true;
-    waitingForDetailRef.current = false;
-    detailNotesRef.current = [];
-    remainingFieldsRef.current = [];
-    setUnderstoodText(analyzed.interpretedText);
-    setFinalSummary("");
-    setApprovalReady(false);
-    setApprovalBlockReason("고객 확인이 필요합니다.");
-    const nextTranscript = `${transcriptRef.current}\n${trimmed}`.trim();
-    transcriptRef.current = nextTranscript;
-    setTranscript(nextTranscript);
-    const next = updateAnalysis(nextTranscript);
-    pendingAnalysisRef.current = next;
-    mergeAnalysisSlots(next);
-    const confirmation = buildInitialConfirmation(next);
-    setAssistHint(confirmation);
-    scheduleAssistantResponse(confirmation, 0, next);
   }
 
   function handleNoSpeech() {
@@ -1819,7 +1541,7 @@ export default function Home() {
     setAssistHint(message);
     if (noSpeechCountRef.current <= 1) scheduleAssistantResponse("죄송합니다. 말씀이 잘 들리지 않았습니다. 다시 한 번 말씀해 주세요.");
     if (noSpeechCountRef.current >= 3) {
-      updateAppStatus("WAITING DETAIL");
+      updateAppStatus("LISTENING");
       setAssistHint("고객 말씀을 다시 기다리고 있습니다.");
     }
   }
@@ -1834,7 +1556,15 @@ export default function Home() {
     appendLog("system", message);
     setAssistHint(message);
     if (unclearCountRef.current < 3) scheduleAssistantResponse(message);
-    if (unclearCountRef.current >= 3) setAssistHint("고객 말씀을 다시 기다리고 있습니다.");
+    if (unclearCountRef.current >= 3) {
+      setAssistHint("상담원에게 이관합니다. 인식 실패 맥락을 함께 전달했습니다.");
+      if (!operatorTransferTriggeredRef.current) {
+        triggerOperatorTransfer("STT 인식 실패", {
+          failureReason: "STT 인식 실패",
+          urgency: "P2"
+        });
+      }
+    }
   }
 
   function handleUnsupportedLanguage() {
@@ -1884,7 +1614,7 @@ export default function Home() {
     setVoiceState("에코 차단 중");
     window.setTimeout(() => {
       if (Date.now() < assistantEchoGuardUntilRef.current) return;
-      if (serviceStatusRef.current === "standby") {
+      if (demoPhaseRef.current === "idle") {
         setMicrophoneEnabled(false, "auto");
         setVoiceState("대기 중");
         setAssistHint("서비스 대기 중입니다. 필요하실 때 서비스 시작 버튼을 눌러 주세요.");
@@ -1923,61 +1653,6 @@ export default function Home() {
     });
   }
 
-  function isDemoCheckingStatus() {
-    return demoPhaseRef.current === "checking" || ["checking", "dispatch_checking", "reservation_checking", "processing", "submitted"].includes(serviceStatusRef.current);
-  }
-
-  function normalizeControlText(text: string) {
-    return text.trim().toLowerCase().replace(/[.,!?]/g, "").replace(/\s+/g, " ");
-  }
-
-  function isControlUtterance(text: string) {
-    const normalized = normalizeControlText(text);
-    return /^(다시|다시 해줘|아니 다시|아니 다시 해줘|처음부터|취소|재시작|불러줘|해줘|다시 말할게)$/.test(normalized);
-  }
-
-  function isServiceRepeatUtterance(text: string, active: ConciergeAnalysis) {
-    const normalized = normalizeControlText(text);
-    if (active.serviceType === "taxi") return /^(택시 불러줘|택시 호출|택시 해줘|아이나비 m 택시.*)$/.test(normalized);
-    if (active.serviceType === "hospital_reservation") return /^(병원 예약해줘|병원 예약|예약해줘)$/.test(normalized);
-    if (active.serviceType === "car_maintenance") return /^(차 수리.*|자동차 수리.*|정비.*해줘|as.*해줘)$/.test(normalized);
-    if (active.serviceType === "car_inspection") return /^(자동차 검사.*|차 검사.*|검사.*해줘)$/.test(normalized);
-    if (active.serviceType === "car_accessory_installation") return /^(블랙박스.*|틴팅.*|썬팅.*|선팅.*)$/.test(normalized);
-    if (active.serviceType === "product_purchase") return /^(사줘|구매해줘|주문해줘)$/.test(normalized);
-    return /^(불러줘|해줘)$/.test(normalized);
-  }
-
-  function isControlOrServiceRepeatUtterance(text: string, active: ConciergeAnalysis) {
-    return isControlUtterance(text) || isServiceRepeatUtterance(text, active);
-  }
-
-  function isValidTaxiPlaceUtterance(text: string) {
-    const normalized = normalizeControlText(text);
-    if (!normalized || isControlUtterance(normalized)) return false;
-    if (/(택시|불러줘|해줘|다시|취소|재시작|처음부터)/.test(normalized)) return false;
-    return /에서.+(까지|으로|로)$/.test(normalized) ||
-      /(우리집|집|회사|사무실|역|터미널|공항|병원|학교|아파트|동|구|시|군|로|길|강남|판교|수원|서울|성남|분당|잠실|송파|광교|용인|일산|부천|안양|과천|하남|위례)/.test(normalized);
-  }
-
-  function handleControlUtterance(active: ConciergeAnalysis) {
-    const confirmed = active.serviceType === "unknown" ? pendingAnalysisRef.current ?? confirmedAnalysisRef.current ?? analysis : active;
-    confirmedAnalysisRef.current = confirmed;
-    if (pendingAnalysisRef.current === confirmed) pendingAnalysisRef.current = null;
-    waitingForConfirmationRef.current = false;
-    waitingForDetailRef.current = true;
-    remainingFieldsRef.current = getMissingFields(confirmed);
-    setStatus("waiting_detail");
-    setServiceStatus("waiting_detail");
-    updateAppStatus("WAITING DETAIL");
-    setApprovalReady(false);
-    setApprovalBlockReason(remainingFieldsRef.current[0] ?? "추가 정보");
-    const nextQuestion = confirmed.serviceType === "taxi"
-      ? buildProviderFirstReply(confirmed, "출발지와 도착지를 말씀해 주세요.")
-      : buildNextDetailQuestion(confirmed, remainingFieldsRef.current[0] ?? "추가 정보");
-    setAssistHint(nextQuestion);
-    scheduleAssistantResponse(nextQuestion, 0, confirmed);
-  }
-
   function scheduleUserTurnProcessing() {
     clearPendingResponseTimer();
     pendingResponseTimerRef.current = window.setTimeout(() => {
@@ -1992,6 +1667,8 @@ export default function Home() {
   }
 
   function isValidUserTranscript(text: string) {
+    if (isDemoControlTranscript(text)) return true;
+    if (demoPhaseRef.current === "completed" && isDemoCompletedCloseIntent(text)) return true;
     return isValidFinalTranscript(
       text,
       {
@@ -2015,13 +1692,30 @@ export default function Home() {
   }
 
   function hasActiveServiceContext() {
-    return Boolean(activeDemoServiceRef.current) || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed" || getActiveAnalysis().serviceType !== "unknown" || waitingForDetailRef.current || waitingForConfirmationRef.current;
+    return Boolean(activeDemoServiceRef.current) || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed";
+  }
+
+  function isDemoControlTranscript(text: string) {
+    const clean = text.trim();
+    if (!clean) return false;
+
+    if (demoPhaseRef.current === "confirming" && (isDemoPositiveIntent(clean) || isDemoRestartIntent(clean))) return true;
+    if (
+      demoPhaseRef.current === "collecting" &&
+      activeDemoServiceRef.current &&
+      activeDemoServiceRef.current.serviceType !== "taxi" &&
+      isDemoPositiveIntent(clean)
+    ) {
+      return true;
+    }
+    if (demoPhaseRef.current === "completed" && isDemoCompletedCloseIntent(clean)) return true;
+
+    return false;
   }
 
   function isContextualShortSlot(text: string) {
     const clean = text.trim();
-    if (demoPhaseRef.current === "confirming" && (isDemoPositiveIntent(clean) || isDemoRestartIntent(clean))) return true;
-    if (demoPhaseRef.current === "completed" && isDemoEndIntent(clean)) return true;
+    if (isDemoControlTranscript(clean)) return true;
     if (!hasActiveServiceContext()) return false;
     if (regionKeywords.includes(clean)) return true;
     if (dateKeywords.some((word) => clean.includes(word))) return true;
@@ -2030,59 +1724,18 @@ export default function Home() {
     return false;
   }
 
-  function handleContextualShortSlot(text: string) {
-    const active = getActiveAnalysis();
-    const clean = text.trim();
-    const slots: ServiceSlots = {};
-    if (regionKeywords.includes(clean)) {
-      if (active.serviceType === "taxi" || active.serviceType === "family_mobility") {
-        if (!confirmedSlotsRef.current.destination) slots.destination = clean;
-        else slots.serviceLocation = clean;
-      } else {
-        slots.serviceLocation = clean;
-      }
-    }
-    if (dateKeywords.some((word) => clean.includes(word)) || /^\d{1,2}시$/.test(clean)) {
-      slots.appointmentDateTime = [confirmedSlotsRef.current.appointmentDateTime, clean].filter(Boolean).join(" ");
-    }
-    if (/개인\s*병원|종합\s*병원|피부과|정형외과|내과|소아과/.test(clean)) {
-      slots.appointmentPlace = clean;
-    }
-    if (Object.keys(slots).length === 0) return false;
-
-    if (active.serviceType === "hospital_reservation" && slots.serviceLocation) {
-      setPendingSlotConfirmation(slots, `${slots.serviceLocation} 지역 기준으로 Babelfish 제휴 병원을 확인하겠습니다. 맞으실까요?`);
-      return true;
-    }
-    if (active.serviceType === "taxi" && slots.destination) {
-      setPendingSlotConfirmation(slots, `도착지를 ${slots.destination}으로 이해했습니다. 맞으실까요?`);
-      return true;
-    }
-    if (active.serviceType === "car_maintenance" && slots.serviceLocation) {
-      setPendingSlotConfirmation(slots, `${slots.serviceLocation} 지역의 Babelfish 제휴 자동차 서비스 업체를 확인하겠습니다. 맞으실까요?`);
-      return true;
-    }
-    if (active.serviceType === "car_inspection" && slots.serviceLocation) {
-      setPendingSlotConfirmation(slots, `${slots.serviceLocation} 지역의 Babelfish 제휴 검사소를 확인하겠습니다. 맞으실까요?`);
-      return true;
-    }
-    if (active.serviceType === "car_accessory_installation" && slots.serviceLocation) {
-      setPendingSlotConfirmation(slots, `${slots.serviceLocation} 지역의 아이나비 장착 제휴점 또는 칼트윈 제휴 시공점을 확인하겠습니다. 맞으실까요?`);
-      return true;
-    }
-    setPendingSlotConfirmation(slots);
-    return true;
-  }
-
   function isValidCustomerTranscript(text: string) {
     const clean = text.trim();
     const normalized = clean.toLowerCase().replace(/\s+/g, " ");
+    const isDemoControlCommand = isDemoControlTranscript(clean);
     if (!clean) return false;
-    if (isAssistantTurnActive() || isInsideAssistantEchoGuard()) return false;
+    if (isAssistantTurnActive() && !isDemoControlCommand) return false;
+    if (!isDemoControlCommand && isInsideAssistantEchoGuard()) return false;
     if (isProbablyForeignNoise(clean) && clean.length < 24) return false;
     if (/고객\s*다른\s*기분나/.test(clean)) return false;
-    if (normalized === lastProcessedTranscriptRef.current) return false;
-    if (isAssistantEcho(clean, lastAssistantTextRef.current)) return false;
+    if (!isDemoControlCommand && normalized === lastProcessedTranscriptRef.current) return false;
+    if (demoPhaseRef.current === "completed" && isDemoCompletedCloseIntent(clean)) return true;
+    if (!isDemoControlCommand && isAssistantEcho(clean, lastAssistantTextRef.current)) return false;
     if (isContextualShortSlot(clean)) return true;
     if (clean.length <= 2 && !hasActiveServiceContext()) return false;
     return true;
@@ -2100,92 +1753,6 @@ export default function Home() {
       return;
     }
     console.debug("Rejected customer transcript before logging", text);
-  }
-
-  function extractCorrectedSlots(text: string): ServiceSlots {
-    const active = confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis;
-    const clean = text.replace(/^(아니요|아니|그게 아니고|그게 아니라|잘못 들었어|다시 말할게)[,\s]*/g, "").replace(/이라고$/g, "").trim();
-    if (isControlOrServiceRepeatUtterance(clean || text, active)) return {};
-    const analyzed = analyzeRequest(clean);
-    const slots: ServiceSlots = { ...analyzed.slots };
-    if (!slots.destination && /(판교역|판구역|판규역)/.test(clean)) slots.destination = normalizePlaceCandidate(clean.match(/판교역|판구역|판규역/)?.[0] ?? clean);
-    if (!slots.origin && /(우리집|집|회사|사무실)/.test(clean) && /출발/.test(clean)) slots.origin = normalizePlaceCandidate(clean.match(/우리집|집|회사|사무실/)?.[0] ?? clean);
-    if (!slots.providerName && analyzed.preferredProvider) slots.providerName = analyzed.preferredProvider;
-    return slots;
-  }
-
-  function buildDetailSlots(text: string, answeredField: string, active: ConciergeAnalysis) {
-    if (isControlOrServiceRepeatUtterance(text, active)) return {};
-    const analyzed = analyzeRequest(text);
-    const slots: ServiceSlots = { ...analyzed.slots };
-    const routeMatch = text.match(/(.+?)(?:에서)\s*(.+?)(?:까지|으로|로)?$/);
-    if (routeMatch && (active.serviceType === "taxi" || active.serviceType === "family_mobility")) {
-      slots.origin = normalizePlaceCandidate(routeMatch[1].trim());
-      slots.destination = normalizePlaceCandidate(routeMatch[2].replace(/(까지|으로|로)$/g, "").trim());
-    }
-    if (active.serviceType === "taxi" && (answeredField === "출발지" || answeredField === "도착지") && !isValidTaxiPlaceUtterance(text)) return slots;
-    if (answeredField === "출발지" && !slots.origin) slots.origin = normalizePlaceCandidate(text);
-    if (answeredField === "도착지" && !slots.destination) slots.destination = normalizePlaceCandidate(text);
-    if (active.serviceType === "taxi" && (slots.origin || slots.destination) && !slots.callTiming) slots.callTiming = "즉시 호출";
-    if (answeredField.includes("병원") && !slots.appointmentPlace) slots.appointmentPlace = analyzed.preferredProvider ?? text;
-    if (answeredField.includes("일시") && !slots.appointmentDateTime) slots.appointmentDateTime = text;
-    if (answeredField.includes("지역") && !slots.serviceLocation) slots.serviceLocation = normalizePlaceCandidate(text);
-    if (answeredField.includes("차량 정보") && !slots.vehicleInfo) slots.vehicleInfo = text;
-    if (answeredField === "차량 종류" && !slots.vehicleInfo) slots.vehicleInfo = text;
-    if (answeredField.includes("차량 증상") && !slots.vehicleSymptom) slots.vehicleSymptom = text;
-    if (answeredField === "고객 지정 업체" && !slots.providerName) slots.providerName = text;
-    if (answeredField === "다른 호출 방식" && !slots.providerName) slots.providerName = text;
-    if (answeredField === "제품명" && !slots.productName) slots.productName = text;
-    if (answeredField === "시공 지역" && !slots.serviceLocation) slots.serviceLocation = normalizePlaceCandidate(text);
-    if (answeredField === "상품명" && !slots.productName) slots.productName = text;
-    if (answeredField === "수량" && !slots.quantity) slots.quantity = text;
-    if (answeredField === "배송지" && !slots.deliveryAddress) slots.deliveryAddress = text;
-    if (answeredField === "개선 반영 확인" && !slots.improvementTarget) slots.improvementTarget = text;
-    if (active.serviceType === "service_improvement_command" && !slots.improvementTarget) slots.improvementTarget = active.rawText;
-    return slots;
-  }
-
-  function handleDetailAnswer(text: string) {
-    const confirmed = confirmedAnalysisRef.current;
-    if (!confirmed) return;
-    if (isControlOrServiceRepeatUtterance(text, confirmed)) {
-      handleControlUtterance(confirmed);
-      return;
-    }
-    const answeredField = remainingFieldsRef.current[0] ?? "추가 정보";
-    const slots = buildDetailSlots(text, answeredField, confirmed);
-    if (Object.keys(slots).length === 0) {
-      handleControlUtterance(confirmed);
-      return;
-    }
-    const nextTranscript = `${transcriptRef.current}\n${text}`.trim();
-    transcriptRef.current = nextTranscript;
-    setTranscript(nextTranscript);
-    setApprovalReady(false);
-    waitingForDetailRef.current = false;
-    const placeCandidates = getPlaceCandidates(text);
-    const question = confirmed.serviceType === "taxi" && slots.origin && slots.destination
-      ? `${formatSlots(slots)}로 이해했습니다. 맞으실까요?`
-      : placeCandidates.length > 0
-      ? buildPlaceConfirmationQuestion(placeCandidates)
-      : `${formatSlots(slots)}로 이해했습니다. 맞으실까요?`;
-    setPendingSlotConfirmation(slots, question);
-  }
-
-  function resetPendingFlow() {
-    pendingAnalysisRef.current = null;
-    confirmedAnalysisRef.current = null;
-    waitingForConfirmationRef.current = false;
-    waitingForDetailRef.current = false;
-    detailNotesRef.current = [];
-    remainingFieldsRef.current = [];
-    setUnderstoodText("");
-    setFinalSummary("");
-    setApprovalReady(false);
-    setApprovalBlockReason("고객 요청 확인이 필요합니다.");
-    setStatus("draft");
-    updateAppStatus("LISTENING");
-    setAssistHint("고객 요청을 다시 기다리고 있습니다.");
   }
 
   function safeCreateResponse(payload: { type: "response.create"; response: Record<string, unknown> }) {
@@ -2209,10 +1776,20 @@ export default function Home() {
     return true;
   }
 
-  function forceCreateResponse(message: string) {
+  function forceCreateResponse(message: string, bypass = false) {
     const dc = dcRef.current;
     if (!dc || dc.readyState !== "open") return false;
-    if (isResponseInProgressRef.current || isAssistantSpeakingRef.current || isAssistantAudioPlayingRef.current) return false;
+    const hasActiveResponse = isResponseInProgressRef.current || isAssistantSpeakingRef.current || isAssistantAudioPlayingRef.current;
+    if (hasActiveResponse && !bypass) return false;
+    if (hasActiveResponse && bypass) {
+      // 10초 완료/이관 같은 보장 안내는 현재 AI 발화를 끊고라도 새 안내를 내보낸다.
+      dc.send(JSON.stringify({ type: "response.cancel" }));
+      isResponseInProgressRef.current = false;
+      isAssistantSpeakingRef.current = false;
+      isAssistantAudioPlayingRef.current = false;
+      assistantDraftRef.current = "";
+      setAssistantDraft("");
+    }
     assistantEchoGuardUntilRef.current = 0;
     isResponseInProgressRef.current = true;
     isAssistantSpeakingRef.current = true;
@@ -2224,19 +1801,32 @@ export default function Home() {
     dc.send(JSON.stringify({
       type: "response.create",
       response: {
-        instructions: `다음 문장만 그대로 말하세요. 다른 설명은 덧붙이지 마세요.\n${message}`
+        instructions: buildFixedVoiceInstructions(message)
       }
     }));
     return true;
   }
 
+  function sendRawAssistantResponse(message: string, guaranteed = false) {
+    lastAssistantResponseMessageRef.current = message;
+    lastAssistantMessageAtRef.current = Date.now();
+    if (guaranteed) {
+      if (forceCreateResponse(message, true)) return true;
+      guaranteedAssistantMessageQueueRef.current.push({ message, analysis: null });
+      return false;
+    }
+    const sent = requestAssistantResponse(message);
+    if (sent) expectedAssistantMessageRef.current = message;
+    return sent;
+  }
+
   function sendAssistantResponse(message: string, relatedAnalysis?: ConciergeAnalysis | null, guaranteed = false) {
     const active = relatedAnalysis === undefined ? getActiveAnalysis() : relatedAnalysis;
-    const finalMessage = active && active.serviceType !== "unknown" ? ensureProviderMention(message, active) : message;
+    const finalMessage = toSpokenBrandName(active && active.serviceType !== "unknown" ? ensureProviderMention(message, active) : message);
     lastAssistantResponseMessageRef.current = finalMessage;
     lastAssistantMessageAtRef.current = Date.now();
     if (guaranteed) {
-      if (forceCreateResponse(finalMessage)) return true;
+      if (forceCreateResponse(finalMessage, true)) return true;
       guaranteedAssistantMessageQueueRef.current.push({ message: finalMessage, analysis: !active || active.serviceType === "unknown" ? null : active });
       return false;
     }
@@ -2255,7 +1845,7 @@ export default function Home() {
     return safeCreateResponse({
       type: "response.create",
       response: instructions
-        ? { instructions: `다음 문장만 그대로 말하세요. 다른 설명은 덧붙이지 마세요.\n${instructions}` }
+        ? { instructions: buildFixedVoiceInstructions(instructions) }
         : {}
     });
   }
@@ -2265,7 +1855,7 @@ export default function Home() {
     responseTimerRef.current = window.setTimeout(() => {
       responseTimerRef.current = null;
       const active = relatedAnalysis === undefined ? getActiveAnalysis() : relatedAnalysis;
-      const finalInstructions = active && active.serviceType !== "unknown" ? ensureProviderMention(instructions, active) : instructions;
+      const finalInstructions = toSpokenBrandName(active && active.serviceType !== "unknown" ? ensureProviderMention(instructions, active) : instructions);
       lastAssistantResponseMessageRef.current = finalInstructions;
       if (requestAssistantResponse(finalInstructions)) {
         expectedAssistantMessageRef.current = finalInstructions;
@@ -2299,7 +1889,7 @@ export default function Home() {
 
   function togglePushToTalk() {
     if (phase !== "call" || isAssistantSpeakingRef.current) return;
-    if (serviceStatusRef.current === "standby") {
+    if (demoPhaseRef.current === "idle") {
       recallBabelfish();
       return;
     }
@@ -2311,15 +1901,6 @@ export default function Home() {
     setStatus("draft");
     updateAppStatus("LISTENING");
     setVoiceState("고객 말씀 대기 중");
-    waitingForAdditionalRequestRef.current = false;
-    if (lastCompletedServiceRef.current && satisfactionState !== "만족 확인" && satisfactionState !== "개선 의견 접수") {
-      waitingForSatisfactionRef.current = true;
-      setSatisfactionState("만족도 확인 중");
-      const question = `다시 호출해 주셔서 감사합니다. 이전에 접수한 ${lastCompletedServiceRef.current.serviceType} 서비스는 만족스러우셨나요?`;
-      appendLog("system", question);
-      scheduleAssistantResponse(question);
-      return;
-    }
     const message = "다시 호출해 주셔서 감사합니다. 추가로 필요한 서비스를 말씀해 주세요.";
     appendLog("system", message);
     scheduleAssistantResponse(message);
@@ -2338,54 +1919,12 @@ export default function Home() {
     }
   }
 
-  function sendTextToRealtime(text: string) {
-    const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open") return;
-    dc.send(JSON.stringify({
-      type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text }]
-      }
-    }));
-    scheduleAssistantResponse("고객 버튼 입력을 확인했습니다. 이전 맥락을 유지해 한국어 1~2문장으로 짧게 안내하세요.");
-  }
-
-  async function approveOrder() {
-    if (!approvalReady) {
-      const reason = approvalBlockReason || "진행 전 추가 정보가 필요합니다.";
-      appendLog("system", `진행 전 추가 정보가 필요합니다. ${reason}`);
-      scheduleAssistantResponse(`진행 전 추가 정보가 필요합니다. ${reason}`);
-      return;
-    }
-    updateAppStatus("WAITING APPROVAL");
-    const active = confirmedAnalysisRef.current ?? analysis;
-    const orderId = `${active.serviceType}-${Date.now()}`;
-    const completed = buildSubmittedService(active, orderId);
-    enterCheckingState(active, completed, orderId);
-  }
-
-  function requestChange() {
-    setStatus("change_requested");
-    updateAppStatus("ANALYZING");
-    appendLog("system", "변경 요청을 접수했습니다.");
-    sendTextToRealtime("고객이 조건 변경을 원합니다. 이전 맥락을 유지하고 가격, 수수료, 배송, 일정 변경 가능성을 짧게 확인해 주세요.");
-  }
-
-  function transferOperator() {
-    setStatus("operator_transfer");
-    updateAppStatus("WAITING APPROVAL");
-    appendLog("system", "상담원 연결 요청을 접수했습니다.");
-    sendTextToRealtime("운영자에게 이관하겠다고 한국어로 안내해 주세요.");
-  }
-
   function stopCall(showSummary = true) {
     if (responseTimerRef.current) window.clearTimeout(responseTimerRef.current);
     responseTimerRef.current = null;
     clearPendingResponseTimer();
     stopWatchdog();
-    if (completionTimerRef.current && serviceStatusRef.current !== "submitted") {
+    if (completionTimerRef.current && demoPhaseRef.current !== "checking") {
       window.clearTimeout(completionTimerRef.current);
       completionTimerRef.current = null;
       setIsWaitingDemoCompletion(false);
@@ -2421,6 +1960,13 @@ export default function Home() {
     updateAppStatus("AI READY");
     if (showSummary) setPhase("start");
   }
+
+  const currentDemoService = activeDemoServiceRef.current;
+  const currentDemoSlots = currentDemoService?.slots ?? {};
+  const currentDemoLabel = currentDemoService ? getDemoServiceLabel(currentDemoService) : "요청 확인 후 안내";
+  const currentDemoSummary = currentDemoService ? buildDemoUiSummary(currentDemoService) : "고객 말씀을 기다리고 있습니다.";
+  const currentDemoNextMessage = currentDemoService ? buildDemoNextUiMessage(currentDemoService) : "원하시는 서비스를 말씀해 주세요.";
+  const currentDemoPlan = currentDemoService ? buildDemoExecutionPlan(currentDemoService) : ["고객 요청 대기", "제휴 서비스 확인", "10초 이내 데모 결과 안내"];
 
   if (phase === "start") {
     return (
@@ -2482,8 +2028,7 @@ export default function Home() {
               <span>현재 상태: {demoPhase === "idle" ? "서비스 대기 중" : demoPhase === "greeting" ? "첫 인사 중" : demoPhase === "collecting" ? "정보 수집 중" : demoPhase === "confirming" ? "고객 확인 중" : demoPhase === "checking" ? "제휴사 확인 중" : "접수 완료"}</span>
               <span>최근 완료 서비스: {lastCompletedService?.serviceType ?? "없음"}</span>
               <span>만족도 확인: {satisfactionState}</span>
-              <span>진행 안내: {isWaitingDemoCompletion ? "약 10초 내 결과 안내" : demoCompletionHint || "대기 중"}</span>
-              {serviceRules.length > 0 && <span>개선 요청: {serviceRules[serviceRules.length - 1]}</span>}
+              <span>진행 안내: {isWaitingDemoCompletion ? "10초 이내 결과 안내" : demoCompletionHint || "대기 중"}</span>
             </div>
           </div>
           <div className="logs">
@@ -2495,74 +2040,64 @@ export default function Home() {
             ))}
             {assistantDraft && <article className="log assistant"><span>{AI_NAME}</span><p>{assistantDraft}</p></article>}
           </div>
-          <p className="approval-hint ready">데모 상태: {demoPhase}</p>
+          <p className="demo-phase-hint">데모 상태: {demoPhase}</p>
         </div>
 
         <div className="insight-grid">
           <InsightCard title="Babelfish가 이해한 내용" tone={demoPhase === "checking" || demoPhase === "completed" ? "ok" : "warn"}>
-            <p className="summary-text">{understoodText || analysis.interpretedText || "고객 말씀을 기다리고 있습니다."}</p>
+            <p className="summary-text">{understoodText || currentDemoSummary}</p>
             <div className="confirmation-stack">
               <span className={`confirm-badge ${demoPhase === "checking" || demoPhase === "completed" ? "ready" : "pending"}`}>{demoPhase === "confirming" ? "고객 확인 필요" : demoPhase === "collecting" ? "추가 정보 필요" : demoPhase === "checking" ? "제휴사 확인 중" : demoPhase === "completed" ? "완료" : "대기 중"}</span>
               <span>{remainingFieldsRef.current.length > 0 ? `부족 정보: ${remainingFieldsRef.current.join(", ")}` : "부족 정보 없음"}</span>
-              <span>{analysis.nextQuestion || "다음 질문을 준비 중입니다."}</span>
+              <span>{currentDemoNextMessage}</span>
             </div>
             <dl className="slot-grid">
-              <div><dt>요청 유형</dt><dd>{analysis.interpretedText || "-"}</dd></div>
-              <div><dt>출발지</dt><dd>{confirmedSlots.origin ?? "-"}</dd></div>
-              <div><dt>도착지</dt><dd>{confirmedSlots.destination ?? "-"}</dd></div>
-              <div><dt>예약 일시</dt><dd>{confirmedSlots.appointmentDateTime ?? confirmedSlots.callTiming ?? "-"}</dd></div>
-              <div><dt>고객 지정 업체</dt><dd>{confirmedSlots.providerName ?? analysis.preferredProvider ?? "없음"}</dd></div>
-              <div><dt>확인 상태</dt><dd>{pendingSlotSummary ? "장소/정보 확인 필요" : approvalReady ? "최종 확인 완료" : "고객 확인 필요"}</dd></div>
+              <div><dt>요청 유형</dt><dd>{currentDemoLabel}</dd></div>
+              <div><dt>출발지</dt><dd>{currentDemoSlots.origin ?? "-"}</dd></div>
+              <div><dt>도착지</dt><dd>{currentDemoSlots.destination ?? "-"}</dd></div>
+              <div><dt>지역/업체</dt><dd>{currentDemoSlots.location ?? currentDemoSlots.providerName ?? "-"}</dd></div>
+              <div><dt>예약 일시</dt><dd>{currentDemoSlots.appointmentDateTime ?? currentDemoSlots.callTiming ?? "-"}</dd></div>
+              <div><dt>차량/상품</dt><dd>{currentDemoSlots.vehicleInfo ?? currentDemoSlots.productName ?? "-"}</dd></div>
+              <div><dt>확인 상태</dt><dd>{demoPhase === "confirming" ? "고객 확인 필요" : demoPhase === "checking" ? "제휴사 확인 중" : demoPhase === "completed" ? "완료" : "정보 수집 중"}</dd></div>
             </dl>
-            {pendingSlotSummary && <p className="final-summary pending-summary">{pendingSlotSummary} 확인 대기 중</p>}
             {finalSummary && <p className="final-summary">{finalSummary}</p>}
           </InsightCard>
 
-          <InsightCard title="Babelfish 이해 내용" tone={analysis.escalationRequired ? "warn" : "ok"}>
-            <p className="summary-text">{analysis.summary}</p>
+          <InsightCard title="Babelfish 이해 내용" tone={currentDemoService ? "ok" : "neutral"}>
+            <p className="summary-text">{currentDemoSummary}</p>
             <dl>
-              <div><dt>고객 말씀</dt><dd>{analysis.rawText || "-"}</dd></div>
-              <div><dt>Babelfish 해석</dt><dd>{analysis.interpretedText || "-"}</dd></div>
-              <div><dt>서비스 유형</dt><dd>{analysis.serviceType}</dd></div>
-              <div><dt>언어</dt><dd>{analysis.detectedLanguage} {analysis.allowedLanguage ? "허용" : "제한"}</dd></div>
-              <div><dt>신뢰도</dt><dd>{Math.round(analysis.confidence * 100)}%</dd></div>
-              {analysis.needsConfirmation && <div><dt>확인</dt><dd>고객 확인 필요</dd></div>}
-              {analysis.quantity && <div><dt>수량</dt><dd>{analysis.quantity}</dd></div>}
+              <div><dt>고객 말씀</dt><dd>{currentDemoService?.rawText || "-"}</dd></div>
+              <div><dt>Babelfish 해석</dt><dd>{currentDemoLabel}</dd></div>
+              <div><dt>서비스 유형</dt><dd>{currentDemoService?.serviceType ?? "unknown"}</dd></div>
+              <div><dt>언어</dt><dd>ko 허용</dd></div>
+              <div><dt>신뢰도</dt><dd>{currentDemoService ? "100%" : "-"}</dd></div>
             </dl>
-            {analysis.nextQuestion && <p className="muted">{analysis.nextQuestion}</p>}
-            {analysis.negotiationIntent && <p className="pill">가격/수수료 협상 요청</p>}
-            {analysis.alternativePartnerIntent && <p className="pill">대체 파트너 요청</p>}
-            {analysis.escalationRequired && <p className="warning"><ShieldAlert size={16} /> {analysis.escalationReason}</p>}
           </InsightCard>
 
           <InsightCard title="Babelfish 제휴 네트워크" tone="neutral">
             <div className="network-summary">
-              <span><strong>기본 제휴사</strong>{analysis.partnerCandidates.length > 0 ? analysis.partnerCandidates.map((partner) => partner.name).join(" / ") : analysis.defaultProviders.length > 0 ? analysis.defaultProviders.join(" / ") : "요청 확인 후 안내"}</span>
-              <span><strong>고객 지정 업체</strong>{analysis.preferredProvider ?? confirmedSlots.providerName ?? "없음"}</span>
-              <span><strong>추천 기준</strong>{analysis.recommendationBasis}</span>
-              <span><strong>연결 상태</strong>{analysis.providerConnectionLabel}</span>
+              <span><strong>기본 제휴사</strong>{currentDemoLabel}</span>
+              <span><strong>고객 지정 업체</strong>{currentDemoSlots.providerName ?? "없음"}</span>
+              <span><strong>추천 기준</strong>제휴사 우선 데모 정책</span>
+              <span><strong>연결 상태</strong>{demoPhase === "checking" ? "확인 중" : demoPhase === "completed" ? "접수 완료" : "정보 확인 중"}</span>
             </div>
-            {analysis.partnerCandidates.length === 0 ? <p className="muted">매칭 후보가 없습니다.</p> : analysis.partnerCandidates.map((partner) => (
-              <article className="partner" key={partner.id}>
-                <div className="partner-head">
-                  <strong>{partner.name}</strong>
-                  <span>{partner.category}</span>
-                </div>
-                <p>{partner.recommendation}</p>
-                <div className="partner-meta">
-                  <span>평점 {partner.rating}</span>
-                  <span>예상 {partner.deliveryMinutes}분</span>
-                  <span>{partner.baseFee === 0 ? "예약 확인 후 비용 안내" : `기본 ${partner.baseFee.toLocaleString("ko-KR")}원`}</span>
-                </div>
-                <small>{partner.capabilities.join(" · ")}</small>
-                <div className="linkage-row">{partner.linkage.map((item) => <em key={item}>{item}</em>)}</div>
-              </article>
-            ))}
+            <article className="partner">
+              <div className="partner-head">
+                <strong>{currentDemoLabel}</strong>
+                <span>{currentDemoService?.serviceType ?? "대기 중"}</span>
+              </div>
+              <p>{currentDemoService ? "현재 요청한 서비스의 기본 제휴 네트워크로 연결합니다." : "서비스 요청 후 기본 제휴 네트워크를 안내합니다."}</p>
+              <div className="partner-meta">
+                <span>데모 기준</span>
+                <span>10초 이내 결과 안내</span>
+                <span>제휴사 우선</span>
+              </div>
+            </article>
           </InsightCard>
 
           <InsightCard title="실행 계획" tone="neutral">
             <ol className="plan-list">
-              {analysis.executionPlan.map((item) => <li key={item}>{item}</li>)}
+              {currentDemoPlan.map((item) => <li key={item}>{item}</li>)}
             </ol>
             <div className="order-state"><Send size={16} /> {mockOrderId ? `${mockOrderId} ${isWaitingDemoCompletion ? "확인 중" : status === "completed" ? "성공" : status}` : status}</div>
             {demoCompletionHint && <p className="final-summary pending-summary">{demoCompletionHint}</p>}
@@ -2571,6 +2106,17 @@ export default function Home() {
       </section>
     </main>
   );
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = API_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // API 장애나 지연이 길어지면 상담원 수기 접수로 넘길 수 있도록 명시적으로 타임아웃을 건다.
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function formatApiError(response: Response) {
@@ -2583,6 +2129,9 @@ async function formatApiError(response: Response) {
 }
 
 function formatClientError(error: unknown) {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "서버 요청 시간이 초과되었습니다. 상담원 최우선 수기 접수로 이관합니다.";
+  }
   if (error instanceof TypeError && error.message.includes("fetch")) {
     return `서버 연결 실패: Express 서버(${API_BASE})가 실행 중인지, PORT=8787과 NEXT_PUBLIC_API_BASE_URL 설정이 일치하는지 확인해 주세요.`;
   }
@@ -2593,8 +2142,3 @@ function formatClientError(error: unknown) {
 function InsightCard({ title, tone, children }: { title: string; tone: "ok" | "warn" | "neutral"; children: React.ReactNode }) {
   return <section className={`insight-card ${tone}`}><h2>{title}</h2>{children}</section>;
 }
-
-
-
-
-

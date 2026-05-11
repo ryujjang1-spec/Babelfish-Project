@@ -11,3 +11,7 @@ node_modules
 .next
 dist
 build
+
+.env
+
+tsconfig.tsbuildinfo

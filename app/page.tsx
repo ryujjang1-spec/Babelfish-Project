@@ -33,14 +33,50 @@ const SERVICE_NAME = "Babelfish_온디멘드 컨시어지";
 const DISPLAY_BRAND_NAME = "Babelfish";
 const SPOKEN_BRAND_NAME = "바벨피시";
 const AI_NAME = DISPLAY_BRAND_NAME;
-const FIRST_MESSAGE = "안녕하세요, 바벨피시입니다. 원하시는 서비스를 말씀해 주세요.";
+const DEMO_SCRIPTS = {
+  greeting: "안녕하세요, 바벨피시입니다. 원하시는 서비스를 말씀해 주세요.",
+  start: {
+    taxi: "아이나비 M 택시를 호출하겠습니다. 출발지와 도착지를 말씀해 주세요.",
+    hospital_reservation: "바벨피시 제휴 병원으로 확인 해드릴께요. 진료과와 지역, 희망 일시를 말씀해 주세요.",
+    car_maintenance: "바벨피시 제휴 자동차 서비스 업체로 연결해드리겠습니다. 차량 증상과 지역을 말씀해 주세요.",
+    car_inspection: "바벨피시 제휴 검사소로 연결해드리겠습니다. 차량 정보와 검사 지역, 희망 일시를 말씀해 주세요.",
+    blackbox_installation: "아이나비 블랙박스 장착 서비스를 연결해드리겠습니다. 차량 종류와 장착 지역을 말씀해 주세요.",
+    tinting_installation: "프리미엄 칼트윈 틴팅 시공 서비스를 연결해드리겠습니다. 차량 종류와 시공 지역을 말씀해 주세요.",
+    product_purchase: "바벨피시 제휴 업체를 통해 구매를 도와드리겠습니다. 상품명과 수량을 말씀해 주세요.",
+    unknown: "원하시는 서비스를 말씀해 주세요."
+  },
+  checking: {
+    taxi: "아이나비 M 택시 배차 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.",
+    hospital_reservation: "바벨피시 제휴 병원 예약 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.",
+    car_maintenance: "바벨피시 제휴 자동차 서비스 업체 예약 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.",
+    car_inspection: "바벨피시 제휴 검사소 예약 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.",
+    blackbox_installation: "아이나비 블랙박스 장착 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.",
+    tinting_installation: "칼트윈 틴팅 시공 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.",
+    product_purchase: "바벨피시 제휴 협력사 구매 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.",
+    unknown: "바벨피시 제휴 서비스 연결 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다."
+  },
+  success: {
+    taxi: "아이나비 M 택시 배차 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
+    hospital_reservation: "바벨피시 제휴 병원 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
+    car_maintenance: "바벨피시 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
+    car_inspection: "바벨피시 제휴 검사소 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
+    blackbox_installation: "아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
+    tinting_installation: "칼트윈 틴팅 시공 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
+    product_purchase: "바벨피시 제휴 협력사 구매 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
+    unknown: "바벨피시 제휴 서비스 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+  },
+  end: "종료하겠습니다. 언제든지 필요하실 때 불러주세요. 이용해 주셔서 감사합니다."
+} as const;
+const FIRST_MESSAGE = DEMO_SCRIPTS.greeting;
 const API_REQUEST_TIMEOUT_MS = 10000;
 const FIXED_VOICE_STYLE_INSTRUCTIONS = [
-  "고정 음성 설정은 coral입니다.",
-  "현재 세션과 같은 밝고 차분한 젊은 여성 상담원 톤으로 말합니다.",
-  "말 속도와 높낮이를 매 응답 동일하게 유지하고, 문장 끝을 끝까지 완결합니다.",
-  "아래 고정 문장만 그대로 읽습니다.",
-  "단어를 추가하거나 삭제하거나 바꿔 말하지 않습니다."
+  "아래 문장은 사용자가 보는 화면에 이미 표시된 고정 안내문입니다.",
+  "절대 수정하지 마세요.",
+  "절대 요약하지 마세요.",
+  "절대 부연 설명을 추가하지 마세요.",
+  "절대 문장을 재배열하지 마세요.",
+  "단어를 바꾸지 말고 아래 문장만 정확히 한 번 발화하세요.",
+  "인사말, 확인 멘트, 추가 설명을 붙이지 마세요."
 ].join("\n");
 
 type AppStatus =
@@ -97,6 +133,8 @@ type DemoServiceType =
   | "family_mobility"
   | "unknown";
 
+type DemoScriptServiceType = keyof typeof DEMO_SCRIPTS.start;
+
 type DemoSlots = {
   origin?: string;
   destination?: string;
@@ -120,11 +158,38 @@ type DemoService = {
   slots: DemoSlots;
 };
 
+function sanitizeDemoSlotValue(value?: string) {
+  return String(value ?? "")
+    .trim()
+    .replace(/[.。!?？！,，]+$/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/(에서|부터|까지|으로|로|입니다|이에요|예요|이요|요)$/g, "")
+    .trim();
+}
+
+function sanitizeDemoSlots(slots: DemoSlots): DemoSlots {
+  return {
+    ...slots,
+    origin: sanitizeDemoSlotValue(slots.origin),
+    destination: sanitizeDemoSlotValue(slots.destination),
+    location: sanitizeDemoSlotValue(slots.location),
+    departmentOrSymptom: sanitizeDemoSlotValue(slots.departmentOrSymptom),
+    appointmentDateTime: sanitizeDemoSlotValue(slots.appointmentDateTime),
+    vehicleInfo: sanitizeDemoSlotValue(slots.vehicleInfo),
+    vehicleSymptom: sanitizeDemoSlotValue(slots.vehicleSymptom),
+    productName: sanitizeDemoSlotValue(slots.productName),
+    quantity: sanitizeDemoSlotValue(slots.quantity),
+    deliveryAddress: sanitizeDemoSlotValue(slots.deliveryAddress),
+    providerName: sanitizeDemoSlotValue(slots.providerName)
+  };
+}
+
 type CompletedService = {
   id: string;
   serviceType: string;
   summary: string;
   orderId: string;
+  completedAt?: string;
 };
 
 type OperatorTransferUrgency = "P1" | "P2" | "P3";
@@ -220,7 +285,8 @@ export default function Home() {
   const completionTimerRef = useRef<number | null>(null);
   const completionTimerServiceIdRef = useRef<string | null>(null);
   const checkingServiceIdRef = useRef<string | null>(null);
-  const completedNoticeServiceIdRef = useRef<string | null>(null);
+  const completedServiceIdsRef = useRef<Set<string>>(new Set());
+  const emittedAssistantMessageKeysRef = useRef<Set<string>>(new Set());
   const guaranteedAssistantMessageQueueRef = useRef<Array<{ message: string; analysis: ConciergeAnalysis | null }>>([]);
   const checkingReminderSentRef = useRef(false);
   const operatorTransferTriggeredRef = useRef(false);
@@ -317,7 +383,21 @@ export default function Home() {
   }
 
   function buildFixedVoiceInstructions(message: string) {
-    return `${FIXED_VOICE_STYLE_INSTRUCTIONS}\n\n${message}`;
+    const fixed = toSpokenBrandName(message).trim();
+
+    return [
+      FIXED_VOICE_STYLE_INSTRUCTIONS,
+      "",
+      fixed
+    ].join("\n");
+  }
+
+  function getDemoScriptKey(serviceType: DemoServiceType): DemoScriptServiceType {
+    return serviceType in DEMO_SCRIPTS.start ? serviceType as DemoScriptServiceType : "unknown";
+  }
+
+  function isDemoAssistantOutputLocked() {
+    return isGreetingInProgressRef.current || demoPhaseRef.current !== "idle" || Boolean(activeDemoServiceRef.current);
   }
 
   function isDemoPositiveIntent(text: string) {
@@ -483,25 +563,26 @@ export default function Home() {
   }
 
   function syncDemoSlotsToLegacyState(service: DemoService) {
+    const slots = sanitizeDemoSlots(service.slots);
     const next: ServiceSlots = {
-      origin: service.slots.origin,
-      destination: service.slots.destination,
-      serviceLocation: service.slots.location,
-      providerName: service.slots.providerName,
-      appointmentDateTime: service.slots.appointmentDateTime,
-      vehicleInfo: service.slots.vehicleInfo,
-      vehicleSymptom: service.slots.vehicleSymptom ?? service.slots.departmentOrSymptom,
-      productName: service.slots.productName,
-      quantity: service.slots.quantity,
-      deliveryAddress: service.slots.deliveryAddress,
-      callTiming: service.slots.callTiming
+      origin: slots.origin,
+      destination: slots.destination,
+      serviceLocation: slots.location,
+      providerName: slots.providerName,
+      appointmentDateTime: slots.appointmentDateTime,
+      vehicleInfo: slots.vehicleInfo,
+      vehicleSymptom: slots.vehicleSymptom || slots.departmentOrSymptom,
+      productName: slots.productName,
+      quantity: slots.quantity,
+      deliveryAddress: slots.deliveryAddress,
+      callTiming: slots.callTiming
     };
     confirmedSlotsRef.current = Object.fromEntries(Object.entries(next).filter(([, value]) => Boolean(value))) as ServiceSlots;
     setConfirmedSlots(confirmedSlotsRef.current);
   }
 
   function mergeDemoSlots(service: DemoService, slots: Partial<DemoSlots>) {
-    service.slots = { ...service.slots, ...slots };
+    service.slots = sanitizeDemoSlots({ ...service.slots, ...slots });
     if (service.serviceType === "taxi" && !service.slots.callTiming) service.slots.callTiming = "즉시 호출";
     activeDemoServiceRef.current = service;
     syncDemoSlotsToLegacyState(service);
@@ -619,14 +700,7 @@ export default function Home() {
   }
 
   function buildDemoProviderFirstMessage(service: DemoService) {
-    if (service.serviceType === "taxi") return "아이나비 M 택시를 호출하겠습니다. 출발지와 도착지를 말씀해 주세요.";
-    if (service.serviceType === "hospital_reservation") return "바벨피시 제휴 병원으로 확인 해드릴께요. 진료과와 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "car_maintenance") return "바벨피시 제휴 자동차 서비스 업체로 연결해드리겠습니다. 차량 증상과 지역을 말씀해 주세요.";
-    if (service.serviceType === "car_inspection") return "바벨피시 제휴 검사소로 연결해드리겠습니다. 차량 정보와 검사 지역, 희망 일시를 말씀해 주세요.";
-    if (service.serviceType === "blackbox_installation") return "아이나비 블랙박스 장착 서비스를 연결해드리겠습니다. 차량 종류와 장착 지역을 말씀해 주세요.";
-    if (service.serviceType === "tinting_installation") return "프리미엄 칼트윈 틴팅 시공 서비스를 연결해드리겠습니다. 차량 종류와 시공 지역을 말씀해 주세요.";
-    if (service.serviceType === "product_purchase") return "바벨피시 제휴 업체를 통해 구매를 도와드리겠습니다. 상품명과 수량을 말씀해 주세요.";
-    return "원하시는 서비스를 말씀해 주세요.";
+    return DEMO_SCRIPTS.start[getDemoScriptKey(service.serviceType)] ?? DEMO_SCRIPTS.start.unknown;
   }
 
   function buildDemoRetryQuestion(service: DemoService) {
@@ -640,49 +714,32 @@ export default function Home() {
   }
 
   function buildDemoConfirmationMessage(service: DemoService) {
-    const slots = service.slots;
-    const area = slots.location ?? slots.providerName;
-    if (service.serviceType === "taxi") return `출발지는 ${slots.origin}, 도착지는 ${slots.destination} 입니다. 확인해 주시면 아이나비 M 택시를 호출 하겠습니다.`;
-    if (service.serviceType === "hospital_reservation") return `${area} 지역 ${slots.departmentOrSymptom} 진료 예약으로 확인했습니다. 제휴 병원 예약 가능 여부를 확인할까요?`;
-    if (service.serviceType === "car_maintenance") return `${area} 지역에서 ${slots.vehicleSymptom} 정비로 확인했습니다. 제휴 자동차 서비스 업체 예약 가능 여부를 확인할까요?`;
+    const slots = sanitizeDemoSlots(service.slots);
+    const area = slots.location || slots.providerName || "-";
+    if (service.serviceType === "taxi") return `출발지는 ${slots.origin || "-"}, 도착지는 ${slots.destination || "-"} 입니다. 확인해 주시면 아이나비 M 택시를 호출 하겠습니다.`;
+    if (service.serviceType === "hospital_reservation") return `${area} 지역 ${slots.departmentOrSymptom || "-"} 진료 예약으로 확인했습니다. 제휴 병원 예약 가능 여부를 확인할까요?`;
+    if (service.serviceType === "car_maintenance") return `${area} 지역에서 ${slots.vehicleSymptom || "-"} 정비로 확인했습니다. 제휴 자동차 서비스 업체 예약 가능 여부를 확인할까요?`;
     if (service.serviceType === "car_inspection") return `${area} 지역 차량 검사로 확인했습니다. 바벨피시 제휴 검사소 예약 가능 여부를 확인할까요?`;
     if (service.serviceType === "blackbox_installation") return `${area} 지역 아이나비 블랙박스 장착으로 확인했습니다. 장착 가능 여부를 확인할까요?`;
     if (service.serviceType === "tinting_installation") return `${area} 지역 칼트윈 틴팅 시공으로 확인했습니다. 시공 가능 여부를 확인할까요?`;
-    if (service.serviceType === "product_purchase") return `${slots.productName} 구매 요청으로 확인했습니다. 구매 가능 여부를 확인할까요?`;
+    if (service.serviceType === "product_purchase") return `${slots.productName || "-"} 구매 요청으로 확인했습니다. 구매 가능 여부를 확인할까요?`;
     return "요청하신 내용을 확인했습니다. 진행할까요?";
   }
 
   function buildDemoCheckingMessage(service: DemoService) {
-    if (service.serviceType === "taxi") return "아이나비 M 택시 배차 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
-    if (service.serviceType === "hospital_reservation") return "바벨피시 제휴 병원 예약 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
-    if (service.serviceType === "car_maintenance") return "바벨피시 제휴 자동차 서비스 업체 예약 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
-    if (service.serviceType === "car_inspection") return "바벨피시 제휴 검사소 예약 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
-    if (service.serviceType === "blackbox_installation") return "아이나비 블랙박스 장착 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
-    if (service.serviceType === "tinting_installation") return "칼트윈 틴팅 시공 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
-    if (service.serviceType === "product_purchase") return "바벨피시 제휴 협력사 구매 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
-    return "바벨피시 제휴 서비스 연결 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다.";
+    return DEMO_SCRIPTS.checking[getDemoScriptKey(service.serviceType)] ?? DEMO_SCRIPTS.checking.unknown;
   }
 
   function buildDemoSuccessMessage(service: DemoService) {
-    if (service.serviceType === "taxi") return `아이나비 M 택시 배차 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
-    if (service.serviceType === "hospital_reservation") return "바벨피시 제휴 병원 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
-    if (service.serviceType === "car_maintenance") return "바벨피시 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
-    if (service.serviceType === "car_inspection") return "바벨피시 제휴 검사소 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
-    if (service.serviceType === "blackbox_installation") return "아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
-    if (service.serviceType === "tinting_installation") return "칼트윈 틴팅 시공 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
-    if (service.serviceType === "product_purchase") return "바벨피시 제휴 협력사 구매 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
-    return "바벨피시 제휴 서비스 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
+    return DEMO_SCRIPTS.success[getDemoScriptKey(service.serviceType)] ?? DEMO_SCRIPTS.success.unknown;
   }
 
   function buildDemoPartnerRefusalReply(service: DemoService) {
-    if (service.serviceType === "taxi") return "알겠습니다. 기본 제휴 호출은 아이나비 M 택시입니다. 다른 호출 방식을 원하시면 말씀해 주세요.";
-    if (service.serviceType === "blackbox_installation") return `${SPOKEN_BRAND_NAME}에서는 아이나비 블랙박스를 기본으로 안내합니다. 다른 제품을 원하시면 제품명을 말씀해 주세요.`;
-    if (service.serviceType === "tinting_installation") return `${SPOKEN_BRAND_NAME}에서는 칼트윈 틴팅 필름을 기본으로 안내합니다. 다른 필름을 원하시면 제품명을 말씀해 주세요.`;
-    return "알겠습니다. 원하시는 업체명과 지역을 말씀해 주세요.";
+    return DEMO_SCRIPTS.start[getDemoScriptKey(service.serviceType)] ?? DEMO_SCRIPTS.start.unknown;
   }
 
   function buildDemoUiSummary(service: DemoService) {
-    const slots = service.slots;
+    const slots = sanitizeDemoSlots(service.slots);
     if (service.serviceType === "taxi") return `아이나비 M 택시 요청: ${slots.origin ?? "출발지 미확인"}에서 ${slots.destination ?? "도착지 미확인"}까지`;
     if (service.serviceType === "hospital_reservation") return `Babelfish 제휴 병원 예약: ${slots.location ?? slots.providerName ?? "지역 미확인"} / ${slots.departmentOrSymptom ?? "진료과 미확인"} / ${slots.appointmentDateTime ?? "일시 미확인"}`;
     if (service.serviceType === "car_maintenance") return `Babelfish 제휴 자동차 서비스 업체 예약: ${slots.vehicleSymptom ?? "차량 증상 미확인"} / ${slots.location ?? slots.providerName ?? "지역 미확인"} / ${slots.appointmentDateTime ?? "일시 미확인"}`;
@@ -709,14 +766,20 @@ export default function Home() {
   function buildDemoNextUiMessage(service: DemoService) {
     if (demoPhaseRef.current === "confirming") return buildDemoConfirmationMessage(service);
     if (demoPhaseRef.current === "checking") return buildDemoCheckingMessage(service);
-    if (demoPhaseRef.current === "completed") return "예약 완료 안내 후 고객의 마무리 답변을 기다립니다.";
+    if (demoPhaseRef.current === "completed") {
+      const active = activeDemoServiceRef.current;
+      if (active) return buildDemoSuccessMessage(active);
+      return "";
+    }
     return buildDemoMissingQuestion(service);
   }
 
   function emitDemoAssistantExact(message: string, guaranteed = false) {
     const fixed = toSpokenBrandName(message).trim();
+    if (!fixed) return;
     setAssistHint(fixed);
     lastAssistantResponseMessageRef.current = fixed;
+    expectedAssistantMessageRef.current = fixed;
     appendLog("assistant", fixed);
     sendRawAssistantResponse(fixed, guaranteed);
   }
@@ -752,15 +815,11 @@ export default function Home() {
 
   function enterDemoChecking(service: DemoService) {
     if (demoPhaseRef.current === "checking" && checkingServiceIdRef.current === service.id) {
-      if (!completionTimerRef.current || completionTimerServiceIdRef.current !== service.id) {
-        startSuccessTimer(service);
-      }
       return;
     }
     applyDemoDefaultsBeforeChecking(service);
     activeDemoServiceRef.current = service;
     checkingServiceIdRef.current = service.id;
-    completedNoticeServiceIdRef.current = null;
     demoConfirmationStepRef.current = "content";
     setDemoPhase("checking");
     setServiceStatus("checking");
@@ -781,8 +840,9 @@ export default function Home() {
 
   function startSuccessTimer(service: DemoService) {
     if (!service.id) return;
-    if (completionTimerRef.current && completionTimerServiceIdRef.current === service.id) return;
-    if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
+    if (completionTimerRef.current) {
+      window.clearTimeout(completionTimerRef.current);
+    }
     completionTimerRef.current = null;
     completionTimerServiceIdRef.current = service.id;
     console.log("[DEMO] startSuccessTimer", { serviceId: service.id, serviceType: service.serviceType });
@@ -815,7 +875,7 @@ export default function Home() {
     setStatus("operator_transfer");
     updateAppStatus("SERVER ERROR");
     setSatisfactionState("시스템 장애 - 상담원 최우선 수기 접수 대기(Priority 1)");
-    setAssistHint("상담원에게 우선 이관합니다. 접수 맥락을 함께 전달했습니다.");
+    setAssistHint("수기 접수 대기 상태입니다. 접수 맥락을 함께 전달했습니다.");
     appendLog("event", `상담원 이관: ${payload.failureReason} / 긴급도 ${payload.urgency}`);
     console.warn("[HANDOVER] operator transfer", payload);
     if (typeof window !== "undefined") {
@@ -825,8 +885,8 @@ export default function Home() {
   }
 
   function completeService(service: DemoService) {
-    if (completedNoticeServiceIdRef.current === service.id) return;
-    completedNoticeServiceIdRef.current = service.id;
+    if (completedServiceIdsRef.current.has(service.id)) return;
+    completedServiceIdsRef.current.add(service.id);
     console.log("[DEMO] completeService", { serviceId: service.id, serviceType: service.serviceType });
     completionTimerRef.current = null;
     completionTimerServiceIdRef.current = null;
@@ -841,8 +901,9 @@ export default function Home() {
     const completed: CompletedService = {
       id: service.id,
       orderId: service.id,
-      serviceType: getDemoServiceLabel(service),
-      summary: message
+      serviceType: service.serviceType,
+      summary: message,
+      completedAt: new Date().toISOString()
     };
     lastCompletedServiceRef.current = completed;
     setLastCompletedService(completed);
@@ -857,7 +918,7 @@ export default function Home() {
     completionTimerRef.current = null;
     completionTimerServiceIdRef.current = null;
     checkingServiceIdRef.current = null;
-    completedNoticeServiceIdRef.current = null;
+    emittedAssistantMessageKeysRef.current = new Set();
     checkingReminderSentRef.current = false;
     operatorTransferTriggeredRef.current = false;
     confirmedSlotsRef.current = {};
@@ -873,7 +934,7 @@ export default function Home() {
       setDemoPhase("collecting");
       setServiceStatus("listening");
       remainingFieldsRef.current = getDemoMissingFields(service);
-      emitDemoAssistantExact("원하시는 서비스를 말씀해 주세요.");
+      emitDemoAssistantExact(DEMO_SCRIPTS.start.unknown);
       return;
     }
     const analyzed = analyzeRequest(text);
@@ -961,11 +1022,30 @@ export default function Home() {
     setVoiceState("대기 중");
     setMicrophoneEnabled(false, "auto");
     stopCallAfterEndMessageRef.current = true;
-    emitDemoAssistantExact("종료하겠습니다. 언제든지 필요하실 때 불러주세요. 이용해 주셔서 감사합니다.", true);
+    emitDemoAssistantExact(DEMO_SCRIPTS.end, true);
   }
 
   function handleDemoConversation(text: string) {
     if (demoPhaseRef.current === "checking") {
+      if (isDemoEndIntent(text)) {
+        if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
+        completionTimerRef.current = null;
+        completionTimerServiceIdRef.current = null;
+        checkingServiceIdRef.current = null;
+        setIsWaitingDemoCompletion(false);
+        finishDemoConversation();
+        return;
+      }
+      if (isDemoRestartIntent(text)) {
+        if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
+        completionTimerRef.current = null;
+        completionTimerServiceIdRef.current = null;
+        checkingServiceIdRef.current = null;
+        setIsWaitingDemoCompletion(false);
+        const active = activeDemoServiceRef.current;
+        if (active) enterDemoCollecting(active, buildDemoRetryQuestion(active));
+        return;
+      }
       return;
     }
 
@@ -979,7 +1059,7 @@ export default function Home() {
         beginDemoService(text);
         return;
       }
-      emitDemoAssistantExact("추가로 필요하신 서비스가 있으시면 말씀해 주세요.");
+      emitDemoAssistantExact(DEMO_SCRIPTS.start.unknown);
       return;
     }
 
@@ -1180,6 +1260,8 @@ export default function Home() {
     remainingFieldsRef.current = [];
     confirmedSlotsRef.current = {};
     activeDemoServiceRef.current = null;
+    emittedAssistantMessageKeysRef.current = new Set();
+    completedServiceIdsRef.current = new Set();
     setDemoPhase("greeting");
     lastAssistantTextRef.current = "";
     lastAssistantResponseMessageRef.current = "";
@@ -1227,6 +1309,8 @@ export default function Home() {
     setIsWaitingDemoCompletion(false);
     if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
     completionTimerRef.current = null;
+    completionTimerServiceIdRef.current = null;
+    checkingServiceIdRef.current = null;
     setSatisfactionState("확인 전");
     greetingSentRef.current = false;
     hasSentGreetingRef.current = false;
@@ -1243,7 +1327,7 @@ export default function Home() {
     responseTimerRef.current = null;
     clearPendingResponseTimer();
     startWatchdog();
-    appendLog("system", "통화를 시작합니다. AI가 먼저 인사합니다.");
+    appendLog("system", "통화를 시작합니다.");
 
     try {
       const healthResponse = await fetchWithTimeout(`${API_BASE}/health`);
@@ -1370,8 +1454,10 @@ export default function Home() {
       markAssistantSpeakingStart(false);
       if (event.type === "response.audio_transcript.delta" || event.type === "response.output_text.delta") {
         const nextDraft = `${assistantDraftRef.current}${event.delta ?? ""}`;
-        assistantDraftRef.current = nextDraft;
-        setAssistantDraft(nextDraft);
+        if (!isDemoAssistantOutputLocked()) {
+          assistantDraftRef.current = nextDraft;
+          setAssistantDraft(nextDraft);
+        }
       }
     }
     if (event.type === "response.audio_transcript.done" || event.type === "response.output_text.done") {
@@ -1380,6 +1466,8 @@ export default function Home() {
       if (expected) {
         lastAssistantTextRef.current = expected;
         expectedAssistantMessageRef.current = "";
+      } else if (isDemoAssistantOutputLocked()) {
+        lastAssistantTextRef.current = lastAssistantResponseMessageRef.current;
       } else {
         appendLog("assistant", text);
         lastAssistantTextRef.current = text;
@@ -1783,6 +1871,7 @@ export default function Home() {
   }
 
   function sendAssistantResponse(message: string, relatedAnalysis?: ConciergeAnalysis | null, guaranteed = false) {
+    if (isDemoAssistantOutputLocked()) return false;
     const active = relatedAnalysis === undefined ? getActiveAnalysis() : relatedAnalysis;
     const finalMessage = toSpokenBrandName(active && active.serviceType !== "unknown" ? ensureProviderMention(message, active) : message);
     lastAssistantResponseMessageRef.current = finalMessage;
@@ -1813,6 +1902,7 @@ export default function Home() {
   }
 
   function scheduleAssistantResponse(instructions: string, delayMs = 0, relatedAnalysis?: ConciergeAnalysis | null) {
+    if (isDemoAssistantOutputLocked()) return;
     if (responseTimerRef.current) window.clearTimeout(responseTimerRef.current);
     responseTimerRef.current = window.setTimeout(() => {
       responseTimerRef.current = null;
@@ -1927,7 +2017,7 @@ export default function Home() {
   const currentDemoSlots = currentDemoService?.slots ?? {};
   const currentDemoLabel = currentDemoService ? getDemoServiceLabel(currentDemoService) : "요청 확인 후 안내";
   const currentDemoSummary = currentDemoService ? buildDemoUiSummary(currentDemoService) : "고객 말씀을 기다리고 있습니다.";
-  const currentDemoNextMessage = currentDemoService ? buildDemoNextUiMessage(currentDemoService) : "원하시는 서비스를 말씀해 주세요.";
+  const currentDemoNextMessage = currentDemoService ? buildDemoNextUiMessage(currentDemoService) : DEMO_SCRIPTS.start.unknown;
   const currentDemoPlan = currentDemoService ? buildDemoExecutionPlan(currentDemoService) : ["고객 요청 대기", "제휴 서비스 확인", "결과 안내"];
 
   if (phase === "start") {

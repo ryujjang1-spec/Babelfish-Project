@@ -774,14 +774,63 @@ export default function Home() {
     return buildDemoMissingQuestion(service);
   }
 
-  function emitDemoAssistantExact(message: string, guaranteed = false) {
+  function speakExactText(message: string) {
     const fixed = toSpokenBrandName(message).trim();
     if (!fixed) return;
+
+    lastAssistantTextRef.current = fixed;
+    lastAssistantResponseMessageRef.current = fixed;
+    lastAssistantSpokeAtRef.current = Date.now();
+
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance(fixed);
+    utterance.lang = "ko-KR";
+    utterance.rate = 1;
+    utterance.pitch = 1;
+
+    utterance.onstart = () => {
+      lastAssistantStartedAtRef.current = Date.now();
+      lastAssistantMessageAtRef.current = Date.now();
+      isAssistantSpeakingRef.current = true;
+      isAssistantAudioPlayingRef.current = true;
+      isResponseInProgressRef.current = false;
+      clearPendingResponseTimer();
+      setMicrophoneEnabled(false, "auto");
+      updateAppStatus("AI SPEAKING");
+      setVoiceState("AI 응답 중");
+    };
+
+    const finish = () => {
+      isGreetingInProgressRef.current = false;
+      isAssistantSpeakingRef.current = false;
+      isAssistantAudioPlayingRef.current = false;
+      isResponseInProgressRef.current = false;
+      markAssistantSpeakingEnd();
+    };
+
+    utterance.onend = finish;
+    utterance.onerror = finish;
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function emitDemoAssistantExact(message: string, key?: string) {
+    const fixed = toSpokenBrandName(message).trim();
+    if (!fixed) return;
+    const dedupeKey = key ?? fixed;
+    if (emittedAssistantMessageKeysRef.current.has(dedupeKey)) return;
+    emittedAssistantMessageKeysRef.current.add(dedupeKey);
     setAssistHint(fixed);
     lastAssistantResponseMessageRef.current = fixed;
     expectedAssistantMessageRef.current = fixed;
     appendLog("assistant", fixed);
-    sendRawAssistantResponse(fixed, guaranteed);
+    console.log("[DEMO] emitExact", fixed);
+    speakExactText(fixed);
   }
 
   function enterDemoCollecting(service: DemoService, message: string) {
@@ -833,8 +882,8 @@ export default function Home() {
     setDemoCompletionHint(checkingMessage);
     setIsWaitingDemoCompletion(true);
     checkingReminderSentRef.current = false;
-    console.log("[DEMO] enterChecking", { serviceId: service.id, serviceType: service.serviceType });
-    emitDemoAssistantExact(checkingMessage, true);
+    console.log("[DEMO] enterDemoChecking", service.id, service.serviceType);
+    emitDemoAssistantExact(checkingMessage, `checking:${service.id}`);
     startSuccessTimer(service);
   }
 
@@ -845,7 +894,7 @@ export default function Home() {
     }
     completionTimerRef.current = null;
     completionTimerServiceIdRef.current = service.id;
-    console.log("[DEMO] startSuccessTimer", { serviceId: service.id, serviceType: service.serviceType });
+    console.log("[DEMO] startSuccessTimer", service.id, service.serviceType);
     completionTimerRef.current = window.setTimeout(() => {
       completionTimerRef.current = null;
       completionTimerServiceIdRef.current = null;
@@ -887,7 +936,7 @@ export default function Home() {
   function completeService(service: DemoService) {
     if (completedServiceIdsRef.current.has(service.id)) return;
     completedServiceIdsRef.current.add(service.id);
-    console.log("[DEMO] completeService", { serviceId: service.id, serviceType: service.serviceType });
+    console.log("[DEMO] completeService", service.id, service.serviceType);
     completionTimerRef.current = null;
     completionTimerServiceIdRef.current = null;
     checkingServiceIdRef.current = null;
@@ -909,7 +958,7 @@ export default function Home() {
     setLastCompletedService(completed);
     setSatisfactionState("추가 요청 확인 중");
     setCompletedServices((current) => [completed, ...current]);
-    emitDemoAssistantExact(message, true);
+    emitDemoAssistantExact(message, `success:${service.id}`);
   }
 
   function beginDemoService(text: string) {
@@ -946,17 +995,7 @@ export default function Home() {
     const missing = getDemoMissingFields(service);
     remainingFieldsRef.current = missing;
     if (missing.length === 0) {
-      if (service.serviceType !== "taxi") {
-        enterDemoConfirming(service, "content");
-        return;
-      }
-      const message = `${buildDemoProviderFirstMessage(service)} ${buildDemoConfirmationMessage(service)}`;
-      setDemoPhase("confirming");
-      setServiceStatus("listening");
-      setStatus("draft");
-      updateAppStatus("LISTENING");
-      setUnderstoodText(message);
-      emitDemoAssistantExact(message);
+      enterDemoConfirming(service, "content");
       return;
     }
     enterDemoCollecting(service, buildDemoProviderFirstMessage(service));
@@ -995,6 +1034,10 @@ export default function Home() {
     }
     service.rawText = text;
     mergeDemoSlots(service, slots);
+    if (service.serviceType === "taxi" && service.slots.origin && service.slots.destination) {
+      enterDemoConfirming(service, "content");
+      return;
+    }
     if (service.serviceType === "hospital_reservation") {
       applyDemoDefaultsBeforeChecking(service);
       enterDemoConfirming(service, "content");
@@ -1022,7 +1065,7 @@ export default function Home() {
     setVoiceState("대기 중");
     setMicrophoneEnabled(false, "auto");
     stopCallAfterEndMessageRef.current = true;
-    emitDemoAssistantExact(DEMO_SCRIPTS.end, true);
+    emitDemoAssistantExact(DEMO_SCRIPTS.end, "end");
   }
 
   function handleDemoConversation(text: string) {
@@ -1064,10 +1107,23 @@ export default function Home() {
     }
 
     const active = activeDemoServiceRef.current;
-    if (active && demoPhaseRef.current === "confirming" && isDemoPositiveIntent(text)) {
-      enterDemoChecking(active);
+    if (active && demoPhaseRef.current === "confirming") {
+      if (isDemoPositiveIntent(text)) {
+        enterDemoChecking(active);
+        return;
+      }
+      if (isDemoRestartIntent(text)) {
+        setDemoPhase("collecting");
+        setServiceStatus("listening");
+        setStatus("draft");
+        updateAppStatus("LISTENING");
+        emitDemoAssistantExact("다시 확인하겠습니다. 변경하실 내용을 말씀해 주세요.", `confirm-retry:${active.id}`);
+        return;
+      }
+      emitDemoAssistantExact("확인해 주시면 진행하겠습니다.", `confirm-prompt:${active.id}`);
       return;
     }
+
     if (active && demoPhaseRef.current === "collecting" && active.serviceType !== "taxi" && isDemoPositiveIntent(text)) {
       applyDemoDefaultsBeforeChecking(active);
       enterDemoChecking(active);
@@ -1076,19 +1132,6 @@ export default function Home() {
     const detected = detectDemoServiceType(text);
     if (!active || (detected !== "unknown" && !isSameDemoServiceRequest(text, active))) {
       beginDemoService(text);
-      return;
-    }
-
-    if (demoPhaseRef.current === "confirming") {
-      const confirmingService = activeDemoServiceRef.current;
-      if (isDemoRestartIntent(text)) {
-        active.slots = { callTiming: active.serviceType === "taxi" ? "즉시 호출" : undefined, packageRequested: active.slots.packageRequested };
-        mergeDemoSlots(active, {});
-        demoConfirmationStepRef.current = "content";
-        enterDemoCollecting(active, buildDemoRetryQuestion(active));
-        return;
-      }
-      handleDemoCollecting(text, active);
       return;
     }
 
@@ -1133,7 +1176,7 @@ export default function Home() {
     updateAppStatus("GREETING");
     setVoiceState("AI 응답 중");
     const greetingMessage = retryMessage ?? getOpeningGreetingMessage();
-    emitDemoAssistantExact(greetingMessage, true);
+    emitDemoAssistantExact(greetingMessage, "greeting");
     isAssistantAudioPlayingRef.current = true;
     startGreetingWatchdog();
   }
@@ -1198,7 +1241,7 @@ export default function Home() {
       forceRecoverToListening("Echo guard stuck");
       return;
     }
-    if (demoPhaseRef.current === "collecting" || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed") {
+    if (demoPhaseRef.current === "greeting" || demoPhaseRef.current === "collecting" || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed") {
       // 데모 대화 중에는 과거 analysis 기반 fallback을 쓰지 않는다.
       // 이전 택시 analysis가 병원/틴팅 흐름에 섞여 나오는 문제를 막는다.
       return;

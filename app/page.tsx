@@ -93,7 +93,7 @@ type AppStatus =
   | "ECHO GUARD"
   | "SERVER ERROR";
 
-type VoiceState = "대기 중" | "고객 말씀 대기 중" | "듣는 중" | "고객 말씀 확인 중" | "말씀 미확인" | "소음 무시" | "AI 응답 중" | "에코 차단 중" | "다시 말씀 필요";
+type VoiceState = "대기 중" | "고객 말씀 대기 중" | "듣는 중" | "고객 말씀 확인 중" | "말씀 미확인" | "소음 무시" | "AI 응답 중" | "에코 차단 중" | "다시 말씀 필요" | "완료";
 
 type LogEntry = {
   id: string;
@@ -333,6 +333,10 @@ export default function Home() {
   const demoConfirmationStepRef = useRef<DemoConfirmationStep>("content");
   const confirmedSlotsRef = useRef<ServiceSlots>({});
   const lastCompletedServiceRef = useRef<CompletedService | null>(null);
+  const demoCompletedLockedRef = useRef(false);
+  const completedAtRef = useRef<number | null>(null);
+  const ignoreUserInputUntilRef = useRef<number>(0);
+  const lastAssistantExactTextRef = useRef("");
 
   const sortedLogs = useMemo(() => logs.slice(-14), [logs]);
 
@@ -400,6 +404,14 @@ export default function Home() {
     return isGreetingInProgressRef.current || demoPhaseRef.current !== "idle" || Boolean(activeDemoServiceRef.current);
   }
 
+  function isBlockedAfterCompleted(source: string) {
+    if (demoPhaseRef.current === "completed" || demoCompletedLockedRef.current) {
+      console.log("[DEMO_FLOW] blocked_after_completed", { source });
+      return true;
+    }
+    return false;
+  }
+
   function isDemoPositiveIntent(text: string) {
     const normalized = normalizeDemoText(text);
     if (!normalized) return false;
@@ -420,6 +432,27 @@ export default function Home() {
 
   function isDemoCompletedCloseIntent(text: string) {
     return isDemoEndIntent(text);
+  }
+
+  function normalizeForEchoGuard(value: string) {
+    return value
+      .replace(/\s+/g, "")
+      .replace(/[.,!?~]/g, "")
+      .trim();
+  }
+
+  function isAssistantEchoTranscript(text: string) {
+    const clean = normalizeForEchoGuard(text);
+    const last = normalizeForEchoGuard(lastAssistantExactTextRef.current);
+
+    if (!clean || !last) return false;
+
+    if (Date.now() < ignoreUserInputUntilRef.current) return true;
+
+    if (last.includes(clean) && clean.length >= 6) return true;
+    if (clean.includes(last.slice(0, Math.min(last.length, 20))) && clean.length >= 6) return true;
+
+    return false;
   }
 
   function isDemoForbiddenSlotUtterance(text: string) {
@@ -907,6 +940,40 @@ export default function Home() {
     return ["제휴 서비스 접수 완료", "바벨피시 제휴 네트워크 확인 예정", "추가 안내 예정"];
   }
 
+  function isDemoFulfillmentFollowUp(text: string) {
+    const normalized = normalizeDemoText(text);
+    return /(어디|위치|언제|몇\s*분|도착|차량|차\s*번호|기사|탑승|예약|병원|업체|검사소|장착점|시공점|배송|재고|알림|확인)/.test(normalized);
+  }
+
+  function buildDemoFulfillmentFollowUpMessage(completed: CompletedService, text: string) {
+    const normalized = normalizeDemoText(text);
+    if (completed.serviceType === "taxi") {
+      if (/(어디|위치|도착|몇\s*분|언제|차량|차\s*번호|기사|탑승)/.test(normalized)) {
+        return "배차된 아이나비 M 택시는 현재 탑승 위치로 이동 중입니다. 예상 도착 시간은 약 5분 후입니다.";
+      }
+      return "아이나비 M 택시 배차 요청은 정상 접수되었습니다. 차량번호는 12가 3456이고, 기사님은 김현수 기사님입니다.";
+    }
+    if (completed.serviceType === "hospital_reservation") {
+      return "바벨피시 제휴 병원 예약 요청은 정상 접수되었습니다. 예약 병원은 바벨피시 제휴 메디컬센터이며, 예약 확인 알림을 안내드릴 예정입니다.";
+    }
+    if (completed.serviceType === "car_maintenance") {
+      return "바벨피시 제휴 자동차 서비스 업체 예약 요청은 정상 접수되었습니다. 방문 업체는 바벨피시 제휴 오토케어센터입니다.";
+    }
+    if (completed.serviceType === "car_inspection") {
+      return "바벨피시 제휴 검사소 예약 요청은 정상 접수되었습니다. 방문 검사소는 바벨피시 제휴 자동차 검사센터입니다.";
+    }
+    if (completed.serviceType === "blackbox_installation") {
+      return "아이나비 블랙박스 장착 요청은 정상 접수되었습니다. 방문 업체는 아이나비 제휴 장착센터입니다.";
+    }
+    if (completed.serviceType === "tinting_installation") {
+      return "칼트윈 틴팅 시공 요청은 정상 접수되었습니다. 방문 업체는 프리미엄 칼트윈 제휴 시공센터입니다.";
+    }
+    if (completed.serviceType === "product_purchase") {
+      return "바벨피시 제휴 협력사 구매 요청은 정상 접수되었습니다. 재고와 배송 가능 여부를 확인한 뒤 안내드릴 예정입니다.";
+    }
+    return "요청하신 서비스 접수는 완료되었습니다. 접수 정보는 바벨피시 제휴 네트워크를 통해 확인 후 안내드릴 예정입니다.";
+  }
+
   function buildDemoNextUiMessage(service: DemoService) {
     if (demoPhaseRef.current === "confirming") return buildDemoConfirmationMessage(service);
     if (demoPhaseRef.current === "checking") return buildDemoCheckingMessage(service);
@@ -918,13 +985,52 @@ export default function Home() {
     return buildDemoMissingQuestion(service);
   }
 
+  function clearDemoPendingTimers() {
+    if (completionTimerRef.current) {
+      window.clearTimeout(completionTimerRef.current);
+      completionTimerRef.current = null;
+    }
+    if (pendingResponseTimerRef.current) {
+      window.clearTimeout(pendingResponseTimerRef.current);
+      pendingResponseTimerRef.current = null;
+    }
+    if (responseTimerRef.current) {
+      window.clearTimeout(responseTimerRef.current);
+      responseTimerRef.current = null;
+    }
+    if (greetingTimeoutRef.current) {
+      window.clearTimeout(greetingTimeoutRef.current);
+      greetingTimeoutRef.current = null;
+    }
+    completionTimerServiceIdRef.current = null;
+    guaranteedAssistantMessageQueueRef.current = [];
+    expectedAssistantMessageRef.current = "";
+    assistantDraftRef.current = "";
+    setAssistantDraft("");
+    lastValidUserTurnRef.current = "";
+    fallbackPromptCountRef.current = 0;
+    isResponseInProgressRef.current = false;
+  }
+
+  function releaseDemoCompletedLockByStartButton() {
+    demoCompletedLockedRef.current = false;
+    completedAtRef.current = null;
+    ignoreUserInputUntilRef.current = 0;
+    lastAssistantExactTextRef.current = "";
+    clearDemoPendingTimers();
+    emittedAssistantMessageKeysRef.current = new Set();
+    console.log("[DEMO_FLOW] completed_lock_released_by_start_button");
+  }
+
   function speakExactText(message: string) {
     const fixed = toSpokenBrandName(message).trim();
     if (!fixed) return;
 
     lastAssistantTextRef.current = fixed;
     lastAssistantResponseMessageRef.current = fixed;
+    lastAssistantExactTextRef.current = fixed;
     lastAssistantSpokeAtRef.current = Date.now();
+    ignoreUserInputUntilRef.current = Date.now() + 2000;
 
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       return;
@@ -940,6 +1046,8 @@ export default function Home() {
     utterance.onstart = () => {
       lastAssistantStartedAtRef.current = Date.now();
       lastAssistantMessageAtRef.current = Date.now();
+      lastAssistantExactTextRef.current = fixed;
+      ignoreUserInputUntilRef.current = Date.now() + 2000;
       isAssistantSpeakingRef.current = true;
       isAssistantAudioPlayingRef.current = true;
       isResponseInProgressRef.current = false;
@@ -950,6 +1058,7 @@ export default function Home() {
     };
 
     const finish = () => {
+      ignoreUserInputUntilRef.current = Date.now() + 2000;
       isGreetingInProgressRef.current = false;
       isAssistantSpeakingRef.current = false;
       isAssistantAudioPlayingRef.current = false;
@@ -1081,8 +1190,7 @@ export default function Home() {
     if (completedServiceIdsRef.current.has(service.id)) return;
     completedServiceIdsRef.current.add(service.id);
     console.log("[DEMO] completeService", service.id, service.serviceType);
-    completionTimerRef.current = null;
-    completionTimerServiceIdRef.current = null;
+    clearDemoPendingTimers();
     checkingServiceIdRef.current = null;
     const message = buildDemoSuccessMessage(service);
     setDemoPhase("completed");
@@ -1102,10 +1210,28 @@ export default function Home() {
     setLastCompletedService(completed);
     setSatisfactionState("추가 요청 확인 중");
     setCompletedServices((current) => [completed, ...current]);
+    demoCompletedLockedRef.current = true;
+    completedAtRef.current = Date.now();
+    setMicrophoneEnabled(false, "completed");
+    updateAppStatus("AI READY");
+    setVoiceState("완료");
+    console.log("[DEMO_FLOW] completed_locked", {
+      serviceId: service.id,
+      serviceType: service.serviceType
+    });
     emitDemoAssistantExact(message, `success:${service.id}`);
   }
 
   function beginDemoService(text: string) {
+    console.log("[DEMO_FLOW] beginDemoService", {
+      text,
+      phase: demoPhaseRef.current,
+      locked: demoCompletedLockedRef.current
+    });
+    if (demoCompletedLockedRef.current) {
+      console.log("[DEMO_FLOW] blocked_begin_after_completed", { text });
+      return;
+    }
     const service = makeDemoService(text);
     if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
     completionTimerRef.current = null;
@@ -1213,6 +1339,52 @@ export default function Home() {
   }
 
   function handleDemoConversation(text: string) {
+    const cleanText = text.trim();
+    if (!cleanText) return;
+
+    if (isAssistantEchoTranscript(cleanText)) {
+      console.log("[DEMO_FLOW] ignored_assistant_echo", {
+        text: cleanText,
+        lastAssistant: lastAssistantExactTextRef.current,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
+    if (Date.now() < ignoreUserInputUntilRef.current) {
+      console.log("[DEMO_FLOW] ignored_input_cooldown", {
+        text: cleanText,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
+    if (demoPhaseRef.current === "completed" || demoCompletedLockedRef.current) {
+      console.log("[DEMO_FLOW] completed_guard", {
+        text: cleanText,
+        phase: demoPhaseRef.current,
+        locked: demoCompletedLockedRef.current
+      });
+
+      if (isDemoCompletedCloseIntent(cleanText)) {
+        finishDemoConversation();
+        return;
+      }
+
+      const completed = lastCompletedServiceRef.current;
+      if (completed && isDemoFulfillmentFollowUp(cleanText)) {
+        const message = buildDemoFulfillmentFollowUpMessage(completed, cleanText);
+        emitDemoAssistantExact(message, `followup:${completed.id}:${cleanText}`);
+        return;
+      }
+
+      emitDemoAssistantExact(
+        "요청하신 서비스 접수는 완료되었습니다. 새 서비스를 시작하려면 서비스 시작 버튼을 눌러 주세요.",
+        "completed:new-service-blocked"
+      );
+      return;
+    }
+
     if (demoPhaseRef.current === "checking") {
       if (isDemoEndIntent(text)) {
         if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
@@ -1233,20 +1405,6 @@ export default function Home() {
         if (active) enterDemoCollecting(active, buildDemoRetryQuestion(active));
         return;
       }
-      return;
-    }
-
-    if (demoPhaseRef.current === "completed") {
-      if (isDemoCompletedCloseIntent(text)) {
-        finishDemoConversation();
-        return;
-      }
-      const detected = detectDemoServiceType(text);
-      if (detected !== "unknown") {
-        beginDemoService(text);
-        return;
-      }
-      emitDemoAssistantExact(DEMO_SCRIPTS.start.unknown);
       return;
     }
 
@@ -1368,6 +1526,7 @@ export default function Home() {
   }
 
   function checkStuckState() {
+    if (isBlockedAfterCompleted("checkStuckState")) return;
     const now = Date.now();
     if (demoPhaseRef.current === "checking") {
       // 제휴사 확인 중에는 내부 완료 타이머만 신뢰한다.
@@ -1404,6 +1563,7 @@ export default function Home() {
   }
 
   function forceRecoverToListening(reason: string) {
+    if (isBlockedAfterCompleted("forceRecoverToListening")) return;
     console.warn(reason);
     isResponseInProgressRef.current = false;
     isAssistantSpeakingRef.current = false;
@@ -1433,6 +1593,7 @@ export default function Home() {
   }
 
   async function startCall() {
+    releaseDemoCompletedLockByStartButton();
     setError(null);
     setConnection("마이크 권한 요청 중");
     updateAppStatus("CONNECTING");
@@ -1705,6 +1866,34 @@ export default function Home() {
 
   function processCustomerTranscript(text: string) {
     const trimmed = text.trim();
+
+    if (!trimmed) {
+      handleNoSpeech();
+      return;
+    }
+
+    if (isAssistantEchoTranscript(trimmed)) {
+      console.log("[DEMO_FLOW] ignored_assistant_echo", {
+        text: trimmed,
+        lastAssistant: lastAssistantExactTextRef.current,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
+    if (Date.now() < ignoreUserInputUntilRef.current) {
+      console.log("[DEMO_FLOW] ignored_input_cooldown", {
+        text: trimmed,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
+    if (demoPhaseRef.current === "completed" || demoCompletedLockedRef.current) {
+      handleDemoConversation(trimmed);
+      return;
+    }
+
     const withinSpeechWindow = !isManualModeRef.current || isListeningEnabledRef.current || Date.now() - lastPushToTalkAtRef.current < 5000;
 
     if (!withinSpeechWindow) {
@@ -1712,11 +1901,6 @@ export default function Home() {
         console.debug("Ignored transcript while listening is disabled", trimmed);
         setVoiceState("소음 무시");
       }
-      return;
-    }
-
-    if (!trimmed) {
-      handleNoSpeech();
       return;
     }
 
@@ -1768,6 +1952,7 @@ export default function Home() {
   }
 
   function handleNoSpeech() {
+    if (isBlockedAfterCompleted("handleNoSpeech")) return;
     noSpeechCountRef.current += 1;
     updateAppStatus("NO SPEECH");
     setVoiceState("말씀 미확인");
@@ -1784,6 +1969,7 @@ export default function Home() {
   }
 
   function handleUnclearSpeech() {
+    if (isBlockedAfterCompleted("handleUnclearSpeech")) return;
     unclearCountRef.current += 1;
     updateAppStatus("UNCLEAR SPEECH");
     setVoiceState("다시 말씀 필요");
@@ -1805,6 +1991,7 @@ export default function Home() {
   }
 
   function handleUnsupportedLanguage() {
+    if (isBlockedAfterCompleted("handleUnsupportedLanguage")) return;
     unclearCountRef.current += 1;
     updateAppStatus("UNSUPPORTED LANGUAGE");
     setVoiceState("다시 말씀 필요");
@@ -1814,6 +2001,7 @@ export default function Home() {
   }
 
   function handleNoiseLikeTranscript(text: string) {
+    if (isBlockedAfterCompleted("handleNoiseLikeTranscript")) return;
     noiseCountRef.current += 1;
     updateAppStatus("NO SPEECH");
     setVoiceState("소음 무시");
@@ -1851,6 +2039,12 @@ export default function Home() {
     setVoiceState("에코 차단 중");
     window.setTimeout(() => {
       if (Date.now() < assistantEchoGuardUntilRef.current) return;
+      if (demoCompletedLockedRef.current || demoPhaseRef.current === "completed") {
+        setMicrophoneEnabled(false, "completed");
+        updateAppStatus("AI READY");
+        setVoiceState("완료");
+        return;
+      }
       if (demoPhaseRef.current === "idle") {
         setMicrophoneEnabled(false, "auto");
         setVoiceState("대기 중");
@@ -2045,6 +2239,7 @@ export default function Home() {
   }
 
   function sendRawAssistantResponse(message: string, guaranteed = false) {
+    if (isBlockedAfterCompleted("sendRawAssistantResponse")) return false;
     lastAssistantResponseMessageRef.current = message;
     lastAssistantMessageAtRef.current = Date.now();
     if (guaranteed) {
@@ -2058,6 +2253,7 @@ export default function Home() {
   }
 
   function sendAssistantResponse(message: string, relatedAnalysis?: ConciergeAnalysis | null, guaranteed = false) {
+    if (isBlockedAfterCompleted("sendAssistantResponse")) return false;
     if (isDemoAssistantOutputLocked()) return false;
     const active = relatedAnalysis === undefined ? getActiveAnalysis() : relatedAnalysis;
     const finalMessage = toSpokenBrandName(active && active.serviceType !== "unknown" ? ensureProviderMention(message, active) : message);
@@ -2072,6 +2268,7 @@ export default function Home() {
   }
 
   function flushGuaranteedAssistantMessage() {
+    if (isBlockedAfterCompleted("flushGuaranteedAssistantMessage")) return;
     const queued = guaranteedAssistantMessageQueueRef.current[0];
     if (!queued) return;
     if (isResponseInProgressRef.current || isAssistantSpeakingRef.current || isAssistantAudioPlayingRef.current) return;
@@ -2080,6 +2277,7 @@ export default function Home() {
   }
 
   function requestAssistantResponse(instructions?: string) {
+    if (isBlockedAfterCompleted("requestAssistantResponse")) return false;
     return safeCreateResponse({
       type: "response.create",
       response: instructions
@@ -2089,6 +2287,7 @@ export default function Home() {
   }
 
   function scheduleAssistantResponse(instructions: string, delayMs = 0, relatedAnalysis?: ConciergeAnalysis | null) {
+    if (isBlockedAfterCompleted("scheduleAssistantResponse")) return;
     if (isDemoAssistantOutputLocked()) return;
     if (responseTimerRef.current) window.clearTimeout(responseTimerRef.current);
     responseTimerRef.current = window.setTimeout(() => {
@@ -2109,7 +2308,7 @@ export default function Home() {
     }, delayMs);
   }
 
-  function setMicrophoneEnabled(enabled: boolean, source: "auto" | "manual" = "auto") {
+  function setMicrophoneEnabled(enabled: boolean, source: "auto" | "manual" | "completed" = "auto") {
     isListeningEnabledRef.current = enabled;
     setIsPushToTalkActive(source === "manual" && enabled);
     streamRef.current?.getAudioTracks().forEach((track) => {
@@ -2121,13 +2320,23 @@ export default function Home() {
       setAssistHint(source === "manual" ? "말씀하신 뒤 다시 버튼을 눌러 확인을 시작하세요." : "고객 말씀을 기다리고 있습니다.");
     } else {
       lastPushToTalkAtRef.current = Date.now();
-      setVoiceState("고객 말씀 확인 중");
-      setAssistHint(source === "manual" ? "고객 말씀을 확인하고 있습니다." : "AI 응답 중에는 고객 말씀 분석을 잠시 중지합니다.");
+      if (source === "completed") {
+        setVoiceState("완료");
+        setAssistHint("요청하신 서비스 접수는 완료되었습니다. 새 서비스를 시작하려면 서비스 시작 버튼을 눌러 주세요.");
+      } else {
+        setVoiceState("고객 말씀 확인 중");
+        setAssistHint(source === "manual" ? "고객 말씀을 확인하고 있습니다." : "AI 응답 중에는 고객 말씀 분석을 잠시 중지합니다.");
+      }
     }
   }
 
   function togglePushToTalk() {
     if (phase !== "call" || isAssistantSpeakingRef.current) return;
+    if (demoCompletedLockedRef.current || demoPhaseRef.current === "completed") {
+      releaseDemoCompletedLockByStartButton();
+      recallBabelfish();
+      return;
+    }
     if (demoPhaseRef.current === "idle") {
       recallBabelfish();
       return;
@@ -2136,13 +2345,14 @@ export default function Home() {
   }
 
   function recallBabelfish() {
+    activeDemoServiceRef.current = null;
+    setDemoPhase("idle");
     setServiceStatus("listening");
     setStatus("draft");
     updateAppStatus("LISTENING");
     setVoiceState("고객 말씀 대기 중");
     const message = "다시 호출해 주셔서 감사합니다. 추가로 필요한 서비스를 말씀해 주세요.";
-    appendLog("system", message);
-    scheduleAssistantResponse(message);
+    emitDemoAssistantExact(message, "recall");
   }
 
   function toggleManualMode() {

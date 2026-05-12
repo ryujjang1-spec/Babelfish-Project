@@ -35,7 +35,6 @@ const SPOKEN_BRAND_NAME = "바벨피시";
 const AI_NAME = DISPLAY_BRAND_NAME;
 const FIRST_MESSAGE = `안녕하세요? 고객님의 비서 ${SPOKEN_BRAND_NAME} 입니다. 원하시는 서비스를 말씀해주세요.`;
 const API_REQUEST_TIMEOUT_MS = 10000;
-const DEMO_NEXT_REQUEST_PROMPT = "요청이 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.";
 const FIXED_VOICE_STYLE_INSTRUCTIONS = [
   "고정 음성 설정은 coral입니다.",
   "현재 세션과 같은 밝고 차분한 젊은 여성 상담원 톤으로 말합니다.",
@@ -703,15 +702,15 @@ export default function Home() {
   }
 
   function buildDemoSuccessMessage(service: DemoService) {
-    if (service.serviceType === "taxi") return `아이나비 M 택시 배차가 완료되었습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    if (service.serviceType === "hospital_reservation") return `${SPOKEN_BRAND_NAME} 제휴 병원 예약이 완료되었습니다. ${service.slots.departmentOrSymptom ?? "일반 진료"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 확정되었습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    if (service.serviceType === "car_maintenance") return `${SPOKEN_BRAND_NAME} 제휴 자동차 서비스 업체 예약이 완료되었습니다. ${service.slots.vehicleSymptom ?? "일반 점검"} 서비스로 접수되었습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    if (service.serviceType === "car_inspection") return `${SPOKEN_BRAND_NAME} 제휴 검사소 예약이 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"} 검사를 ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    if (service.serviceType === "blackbox_installation") return service.slots.packageRequested ? `아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공 접수가 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. ${DEMO_NEXT_REQUEST_PROMPT}` : `아이나비 블랙박스 장착 접수가 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    if (service.serviceType === "tinting_installation") return `칼트윈 틴팅 필름 시공 접수가 완료되었습니다. ${service.slots.vehicleInfo ?? "고객 차량"}, ${service.slots.appointmentDateTime ?? "가장 빠른 가능 시간"} 기준으로 접수했습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    if (service.serviceType === "product_purchase") return `${SPOKEN_BRAND_NAME} 제휴 협력사를 통한 구매 요청 접수가 완료되었습니다. 상품은 ${service.slots.productName ?? "요청 상품"}, 수량은 ${service.slots.quantity ?? "1개"} 기준으로 접수했습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    if (service.serviceType === "family_mobility") return `${SPOKEN_BRAND_NAME} 가족 이동 서비스 연결이 완료되었습니다. 출발지는 ${service.slots.origin ?? "현재 위치"}, 도착지는 ${service.slots.destination ?? "요청 목적지"} 기준으로 접수했습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
-    return `${SPOKEN_BRAND_NAME} 제휴 서비스 연결이 완료되었습니다. 요청하신 내용 기준으로 접수했습니다. ${DEMO_NEXT_REQUEST_PROMPT}`;
+    if (service.serviceType === "taxi") return `아이나비 M 택시 배차 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    if (service.serviceType === "hospital_reservation") return `${SPOKEN_BRAND_NAME} 제휴 병원 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    if (service.serviceType === "car_maintenance") return `${SPOKEN_BRAND_NAME} 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    if (service.serviceType === "car_inspection") return `${SPOKEN_BRAND_NAME} 제휴 검사소 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    if (service.serviceType === "blackbox_installation") return service.slots.packageRequested ? `아이나비 블랙박스와 칼트윈 틴팅 필름 패키지 시공 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.` : `아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    if (service.serviceType === "tinting_installation") return `칼트윈 틴팅 필름 시공 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    if (service.serviceType === "product_purchase") return `${SPOKEN_BRAND_NAME} 제휴 협력사를 통한 구매 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    if (service.serviceType === "family_mobility") return `${SPOKEN_BRAND_NAME} 가족 이동 서비스 연결 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
+    return `${SPOKEN_BRAND_NAME} 제휴 서비스 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.`;
   }
 
   function buildDemoPartnerRefusalReply(service: DemoService) {
@@ -792,6 +791,9 @@ export default function Home() {
 
   function enterDemoChecking(service: DemoService) {
     if (demoPhaseRef.current === "checking" && checkingServiceIdRef.current === service.id) {
+      if (!completionTimerRef.current || completionTimerServiceIdRef.current !== service.id) {
+        startSuccessTimer(service);
+      }
       return;
     }
     applyDemoDefaultsBeforeChecking(service);
@@ -824,6 +826,8 @@ export default function Home() {
     completionTimerServiceIdRef.current = service.id;
     console.log("[DEMO] startSuccessTimer", { serviceId: service.id, serviceType: service.serviceType });
     completionTimerRef.current = window.setTimeout(() => {
+      completionTimerRef.current = null;
+      completionTimerServiceIdRef.current = null;
       completeService(service);
     }, DEMO_SUCCESS_DELAY_MS);
   }
@@ -883,7 +887,7 @@ export default function Home() {
     setLastCompletedService(completed);
     setSatisfactionState("추가 요청 확인 중");
     setCompletedServices((current) => [completed, ...current]);
-    emitDemoAssistant(message, true);
+    emitDemoAssistant(message);
   }
 
   function beginDemoService(text: string) {

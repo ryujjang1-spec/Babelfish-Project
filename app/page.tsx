@@ -730,8 +730,140 @@ export default function Home() {
     return DEMO_SCRIPTS.checking[getDemoScriptKey(service.serviceType)] ?? DEMO_SCRIPTS.checking.unknown;
   }
 
+  // Demo fulfillment details are fixed mock values.
+  // Replace these values with real dispatch/reservation API results in production.
+  function buildDemoFulfillmentDetailMessage(service: DemoService) {
+    const slots = sanitizeDemoSlots(service.slots);
+
+    if (service.serviceType === "taxi") {
+      return [
+        "배차 정보입니다.",
+        "차량은 아이나비 M 택시, 차량번호는 12가 3456입니다.",
+        "기사님은 김현수 기사님이며, 예상 도착 시간은 약 5분 후입니다.",
+        "탑승 위치에서 대기해 주세요."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "hospital_reservation") {
+      return [
+        "예약 정보입니다.",
+        `${slots.location || "요청 지역"} 제휴 병원으로 접수되었습니다.`,
+        "예약 병원은 바벨피시 제휴 메디컬센터입니다.",
+        "진료 항목은 요청하신 진료 내용 기준으로 접수되었고, 예약 확인 알림을 안내드릴 예정입니다."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "car_maintenance") {
+      return [
+        "예약 정보입니다.",
+        `${slots.location || "요청 지역"} 제휴 자동차 서비스 업체로 접수되었습니다.`,
+        "방문 업체는 바벨피시 제휴 오토케어센터입니다.",
+        "접수된 증상 기준으로 차량 점검 후 정비 가능 여부를 안내드릴 예정입니다."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "car_inspection") {
+      return [
+        "예약 정보입니다.",
+        `${slots.location || "요청 지역"} 제휴 검사소로 접수되었습니다.`,
+        "방문 검사소는 바벨피시 제휴 자동차 검사센터입니다.",
+        "차량 정보 확인 후 검사 가능 시간을 안내드릴 예정입니다."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "blackbox_installation") {
+      return [
+        "예약 정보입니다.",
+        `${slots.location || "요청 지역"} 아이나비 블랙박스 장착점으로 접수되었습니다.`,
+        "방문 업체는 아이나비 제휴 장착센터입니다.",
+        "차량 종류 확인 후 장착 가능 시간을 안내드릴 예정입니다."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "tinting_installation") {
+      return [
+        "예약 정보입니다.",
+        `${slots.location || "요청 지역"} 칼트윈 틴팅 시공점으로 접수되었습니다.`,
+        "방문 업체는 프리미엄 칼트윈 제휴 시공센터입니다.",
+        "차량 종류와 희망 시공 범위 확인 후 예약 가능 시간을 안내드릴 예정입니다."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "product_purchase") {
+      return [
+        "구매 접수 정보입니다.",
+        `${slots.productName || "요청 상품"} 구매 요청이 제휴 협력사로 접수되었습니다.`,
+        "재고와 배송 가능 여부를 확인한 뒤 안내드릴 예정입니다."
+      ].join(" ");
+    }
+
+    return "접수 정보는 바벨피시 제휴 네트워크를 통해 확인 후 안내드릴 예정입니다.";
+  }
+
   function buildDemoSuccessMessage(service: DemoService) {
-    return DEMO_SCRIPTS.success[getDemoScriptKey(service.serviceType)] ?? DEMO_SCRIPTS.success.unknown;
+    const detail = buildDemoFulfillmentDetailMessage(service);
+
+    if (service.serviceType === "taxi") {
+      return [
+        "아이나비 M 택시 배차 요청이 성공적으로 접수되었습니다.",
+        detail,
+        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "hospital_reservation") {
+      return [
+        "바벨피시 제휴 병원 예약 요청이 성공적으로 접수되었습니다.",
+        detail,
+        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "car_maintenance") {
+      return [
+        "바벨피시 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다.",
+        detail,
+        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "car_inspection") {
+      return [
+        "바벨피시 제휴 검사소 예약 요청이 성공적으로 접수되었습니다.",
+        detail,
+        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "blackbox_installation") {
+      return [
+        "아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다.",
+        detail,
+        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "tinting_installation") {
+      return [
+        "칼트윈 틴팅 시공 요청이 성공적으로 접수되었습니다.",
+        detail,
+        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      ].join(" ");
+    }
+
+    if (service.serviceType === "product_purchase") {
+      return [
+        "바벨피시 제휴 협력사 구매 요청이 성공적으로 접수되었습니다.",
+        detail,
+        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      ].join(" ");
+    }
+
+    return [
+      "바벨피시 제휴 서비스 요청이 성공적으로 접수되었습니다.",
+      detail,
+      "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+    ].join(" ");
   }
 
   function buildDemoPartnerRefusalReply(service: DemoService) {
@@ -761,6 +893,18 @@ export default function Home() {
     if (service.serviceType === "product_purchase") return ["상품명 확인", "수량 또는 배송지 확인", "구매 요청 접수 완료 안내"];
     if (service.serviceType === "family_mobility") return ["출발지/도착지 확인", "바벨피시 가족 이동 서비스 연결 확인", "연결 요청 접수 완료 안내"];
     return ["고객 요청 확인", "바벨피시 제휴 서비스 연결 확인", "연결 요청 접수 완료 안내"];
+  }
+
+  function buildDemoFulfillmentSummaryItems(service: DemoService) {
+    const slots = sanitizeDemoSlots(service.slots);
+    if (service.serviceType === "taxi") return ["배차 접수 완료", "차량번호: 12가 3456", "기사: 김현수", "예상 도착: 약 5분 후"];
+    if (service.serviceType === "hospital_reservation") return ["병원 예약 접수 완료", "병원: 바벨피시 제휴 메디컬센터", `지역: ${slots.location || "요청 지역"}`, "확인 알림 예정"];
+    if (service.serviceType === "car_maintenance") return ["정비 예약 접수 완료", "업체: 바벨피시 제휴 오토케어센터", `지역: ${slots.location || "요청 지역"}`, `증상: ${slots.vehicleSymptom || "요청 증상"}`];
+    if (service.serviceType === "car_inspection") return ["검사 예약 접수 완료", "검사소: 바벨피시 제휴 자동차 검사센터", `지역: ${slots.location || "요청 지역"}`, "검사 가능 시간 안내 예정"];
+    if (service.serviceType === "blackbox_installation") return ["장착 예약 접수 완료", "업체: 아이나비 제휴 장착센터", `지역: ${slots.location || "요청 지역"}`, "장착 가능 시간 안내 예정"];
+    if (service.serviceType === "tinting_installation") return ["시공 예약 접수 완료", "업체: 프리미엄 칼트윈 제휴 시공센터", `지역: ${slots.location || "요청 지역"}`, "시공 가능 시간 안내 예정"];
+    if (service.serviceType === "product_purchase") return ["구매 요청 접수 완료", `상품: ${slots.productName || "요청 상품"}`, "재고 확인 예정", "배송 가능 여부 안내 예정"];
+    return ["제휴 서비스 접수 완료", "바벨피시 제휴 네트워크 확인 예정", "추가 안내 예정"];
   }
 
   function buildDemoNextUiMessage(service: DemoService) {
@@ -2061,7 +2205,11 @@ export default function Home() {
   const currentDemoLabel = currentDemoService ? getDemoServiceLabel(currentDemoService) : "요청 확인 후 안내";
   const currentDemoSummary = currentDemoService ? buildDemoUiSummary(currentDemoService) : "고객 말씀을 기다리고 있습니다.";
   const currentDemoNextMessage = currentDemoService ? buildDemoNextUiMessage(currentDemoService) : DEMO_SCRIPTS.start.unknown;
-  const currentDemoPlan = currentDemoService ? buildDemoExecutionPlan(currentDemoService) : ["고객 요청 대기", "제휴 서비스 확인", "결과 안내"];
+  const currentDemoPlan = currentDemoService
+    ? demoPhase === "completed"
+      ? buildDemoFulfillmentSummaryItems(currentDemoService)
+      : buildDemoExecutionPlan(currentDemoService)
+    : ["고객 요청 대기", "제휴 서비스 확인", "결과 안내"];
 
   if (phase === "start") {
     return (

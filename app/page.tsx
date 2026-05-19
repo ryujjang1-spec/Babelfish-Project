@@ -9,12 +9,10 @@ import {
   type OrderStatus,
   type ServiceSlots
 } from "../shared";
-import { ensureProviderMention as policyEnsureProviderMention } from "../partnerPolicy";
-import { buildContextFallback as stateBuildContextFallback, DEMO_SUCCESS_DELAY_MS, standbyMessage } from "../serviceStateMachine";
+import { DEMO_SUCCESS_DELAY_MS, standbyMessage } from "../serviceStateMachine";
 import {
   AI_RESPONSE_STUCK_TIMEOUT_MS,
   ASSISTANT_ECHO_GUARD_MS,
-  CUSTOMER_RESPONSE_DELAY_MS,
   GREETING_MAX_RETRY,
   GREETING_START_DELAY_MS,
   GREETING_STUCK_TIMEOUT_MS,
@@ -33,8 +31,38 @@ const SERVICE_NAME = "Babelfish_온디멘드 컨시어지";
 const DISPLAY_BRAND_NAME = "Babelfish";
 const SPOKEN_BRAND_NAME = "바벨피시";
 const AI_NAME = DISPLAY_BRAND_NAME;
+const FOLLOWUP_PROMPT = "이어서 처리할 다른 요청이 있으시면 바로 말씀해 주세요. 없으시면 종료하겠다고 말씀해 주세요.";
+const SCRIPT_TEMPLATES = {
+  confirmRetry: "다시 확인하겠습니다. 변경하실 내용을 말씀해 주세요.",
+  confirmPrompt: "확인해 주시면 진행하겠습니다.",
+  followupGuide: "이어서 처리할 요청을 말씀해 주세요. 없으시면 종료하겠다고 말씀해 주세요.",
+  followupIdleReminder: "추가 요청이 없으시면 통화를 종료하겠습니다. 필요하신 내용이 있으면 지금 말씀해 주세요.",
+  noSpeechFirst: "말씀이 확인되지 않았습니다. 다시 말씀해 주세요.",
+  noSpeechRepeat: "말씀이 잘 들리지 않았습니다. 원하시는 서비스명만 다시 말씀해 주세요.",
+  noSpeechVoice: "죄송합니다. 말씀이 잘 들리지 않았습니다. 다시 한 번 말씀해 주세요.",
+  unclearFirst: "말씀하신 내용 파악이 어려웠습니다. 다시 말씀해 주세요.",
+  unclearRepeat: "말씀하신 내용을 다시 확인하겠습니다. 원하시는 서비스와 장소를 한 번만 더 말씀해 주세요.",
+  unsupportedLanguage: "죄송합니다. 말씀을 정확히 파악하지 못했습니다. 한국어, 영어 또는 일본어로 다시 말씀해 주세요.",
+  noiseRetry: "죄송합니다. 말씀이 정확히 들리지 않았습니다. 다시 한 번 말씀해 주세요.",
+  completedLocked: "통화를 종료하는 중입니다.",
+  recall: "다시 호출해 주셔서 감사합니다. 추가로 필요한 서비스를 말씀해 주세요.",
+  operatorTransferHint: "수기 접수 대기 상태입니다. 접수 맥락을 함께 전달했습니다.",
+  waitingForCustomer: "고객 말씀을 다시 기다리고 있습니다.",
+  initialGreetingHint: "AI 첫 인사 후 자동으로 고객 말씀 대기 상태가 됩니다.",
+  standbyHint: "서비스 대기 중입니다.",
+  autoListenHint: "고객 말씀을 기다리고 있습니다.",
+  manualListenHint: "말씀하신 뒤 다시 확인을 시작하세요.",
+  autoWaitingHint: "고객 말씀을 기다리고 있습니다.",
+  manualAnalyzingHint: "고객 말씀을 확인하고 있습니다.",
+  assistantTurnPausedHint: "AI 응답 중에는 고객 말씀 분석을 잠시 중지합니다.",
+  manualModeHint: "수동 말하기 모드입니다. 필요할 때 화면의 말하기 컨트롤로 다시 말씀해 주세요.",
+  autoModeHint: "자연 대화 모드입니다. 버튼을 누르지 않아도 말씀하실 수 있습니다.",
+  unsupportedLanguageHint: "한국어, 영어 또는 일본어로 다시 말씀해 주세요.",
+  noiseHint: "다시 한 번 또렷하게 말씀해 주세요.",
+  operatorHandoffHint: "상담원에게 이관합니다. 인식 실패 맥락을 함께 전달했습니다."
+} as const;
 const DEMO_SCRIPTS = {
-  greeting: "안녕하세요, 바벨피시입니다. 원하시는 서비스를 말씀해 주세요.",
+  greeting: "안녕하세요, 바벨피시입니다. 제휴 서비스와 연결해 실행까지 도와드리겠습니다. 원하시는 내용을 말씀해 주세요.",
   start: {
     taxi: "아이나비 M 택시를 호출하겠습니다. 출발지와 도착지를 말씀해 주세요.",
     hospital_reservation: "바벨피시 제휴 병원으로 확인 해드릴께요. 진료과와 지역, 희망 일시를 말씀해 주세요.",
@@ -56,28 +84,23 @@ const DEMO_SCRIPTS = {
     unknown: "바벨피시 제휴 서비스 연결 가능 여부를 확인 중입니다. 바로 결과를 안내드리겠습니다."
   },
   success: {
-    taxi: "아이나비 M 택시 배차 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
-    hospital_reservation: "바벨피시 제휴 병원 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
-    car_maintenance: "바벨피시 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
-    car_inspection: "바벨피시 제휴 검사소 예약 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
-    blackbox_installation: "아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
-    tinting_installation: "칼트윈 틴팅 시공 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
-    product_purchase: "바벨피시 제휴 협력사 구매 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요.",
-    unknown: "바벨피시 제휴 서비스 요청이 성공적으로 접수되었습니다. 추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+    taxi: `아이나비 M 택시 배차 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`,
+    hospital_reservation: `바벨피시 제휴 병원 예약 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`,
+    car_maintenance: `바벨피시 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`,
+    car_inspection: `바벨피시 제휴 검사소 예약 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`,
+    blackbox_installation: `아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`,
+    tinting_installation: `칼트윈 틴팅 시공 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`,
+    product_purchase: `바벨피시 제휴 협력사 구매 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`,
+    unknown: `바벨피시 제휴 서비스 요청이 성공적으로 접수되었습니다. ${FOLLOWUP_PROMPT}`
   },
   end: "종료하겠습니다. 언제든지 필요하실 때 불러주세요. 이용해 주셔서 감사합니다."
 } as const;
 const FIRST_MESSAGE = DEMO_SCRIPTS.greeting;
 const API_REQUEST_TIMEOUT_MS = 10000;
-const FIXED_VOICE_STYLE_INSTRUCTIONS = [
-  "아래 문장은 사용자가 보는 화면에 이미 표시된 고정 안내문입니다.",
-  "절대 수정하지 마세요.",
-  "절대 요약하지 마세요.",
-  "절대 부연 설명을 추가하지 마세요.",
-  "절대 문장을 재배열하지 마세요.",
-  "단어를 바꾸지 말고 아래 문장만 정확히 한 번 발화하세요.",
-  "인사말, 확인 멘트, 추가 설명을 붙이지 마세요."
-].join("\n");
+const STT_TURN_MERGE_WAIT_MS = 650;
+const STT_SLOT_READY_WAIT_MS = 250;
+const FOLLOWUP_IDLE_TIMEOUT_MS = 8000;
+const FOLLOWUP_FINAL_TIMEOUT_MS = 15000;
 
 type AppStatus =
   | "AI READY"
@@ -93,7 +116,17 @@ type AppStatus =
   | "ECHO GUARD"
   | "SERVER ERROR";
 
-type VoiceState = "대기 중" | "고객 말씀 대기 중" | "듣는 중" | "고객 말씀 확인 중" | "말씀 미확인" | "소음 무시" | "AI 응답 중" | "에코 차단 중" | "다시 말씀 필요";
+type VoiceState =
+  | "대기 중"
+  | "고객 말씀 대기 중"
+  | "듣는 중"
+  | "고객 말씀 확인 중"
+  | "말씀 미확인"
+  | "소음 무시"
+  | "AI 응답 중"
+  | "에코 차단 중"
+  | "다시 말씀 필요"
+  | "완료";
 
 type LogEntry = {
   id: string;
@@ -105,9 +138,13 @@ type ServiceStatus =
   | "idle"
   | "listening"
   | "analyzing"
+  | "waiting_confirmation"
+  | "waiting_detail"
+  | "ready_for_approval"
   | "checking"
   | "submitted"
   | "completed"
+  | "followup_listening"
   | "standby"
   | "feedback_pending"
   | "operator_transfer";
@@ -118,7 +155,9 @@ type DemoPhase =
   | "collecting"
   | "confirming"
   | "checking"
-  | "completed";
+  | "completed"
+  | "followup_listening"
+  | "ending";
 
 type DemoConfirmationStep = "content" | "proceed";
 
@@ -156,6 +195,23 @@ type DemoService = {
   serviceType: DemoServiceType;
   rawText: string;
   slots: DemoSlots;
+};
+
+type CustomerNextEvent =
+  | "start_service"
+  | "update_slots"
+  | "confirm_service"
+  | "restart_service"
+  | "end_service"
+  | "ignore";
+
+type CustomerUtteranceAnalysis = {
+  transcript: string;
+  intent: DemoServiceType | "confirm" | "restart" | "end" | "unknown";
+  slots: Partial<DemoSlots>;
+  missing_slots: string[];
+  confidence: number;
+  next_event: CustomerNextEvent;
 };
 
 function sanitizeDemoSlotValue(value?: string) {
@@ -236,7 +292,6 @@ const roleLabels: Record<LogEntry["role"], string> = {
 
 const regionKeywords = ["수원", "성남", "분당", "판교", "강남", "서울", "송파", "잠실", "용인", "광교", "일산", "부천", "안양", "과천", "하남", "위례"];
 const dateKeywords = ["오늘", "내일", "모레", "오전", "오후", "저녁", "점심", "아침", "다음 주", "이번 주"];
-const foreignNoisePattern = /[ぁ-ゟ゠-ヿ]|allora|sie hat|karete|sinha|です|ます|あなた/i;
 
 export default function Home() {
   const [phase, setPhase] = useState<"start" | "call" | "summary">("start");
@@ -254,7 +309,7 @@ export default function Home() {
   const [voiceState, setVoiceState] = useState<VoiceState>("대기 중");
   const [isPushToTalkActive, setIsPushToTalkActive] = useState(false);
   const [isManualMode, setIsManualMode] = useState(false);
-  const [assistHint, setAssistHint] = useState("기본은 자동으로 듣습니다. 인식이 안 될 때만 버튼을 눌러 다시 말씀해 주세요.");
+  const [assistHint, setAssistHint] = useState("기본은 자동으로 듣습니다. 인식이 안 될 때만 화면의 말하기 컨트롤을 사용해 주세요.");
   const [understoodText, setUnderstoodText] = useState("");
   const [finalSummary, setFinalSummary] = useState("");
   const [serviceStatus, setServiceStatusState] = useState<ServiceStatus>("idle");
@@ -264,8 +319,6 @@ export default function Home() {
   const [satisfactionState, setSatisfactionState] = useState("확인 전");
   const [demoCompletionHint, setDemoCompletionHint] = useState("");
   const [isWaitingDemoCompletion, setIsWaitingDemoCompletion] = useState(false);
-  const [completedServices, setCompletedServices] = useState<CompletedService[]>([]);
-
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -283,14 +336,15 @@ export default function Home() {
   const responseTimerRef = useRef<number | null>(null);
   const pendingResponseTimerRef = useRef<number | null>(null);
   const completionTimerRef = useRef<number | null>(null);
+  const assistantEchoReleaseTimerRef = useRef<number | null>(null);
+  const followupIdleTimerRef = useRef<number | null>(null);
   const completionTimerServiceIdRef = useRef<string | null>(null);
   const checkingServiceIdRef = useRef<string | null>(null);
   const completedServiceIdsRef = useRef<Set<string>>(new Set());
   const emittedAssistantMessageKeysRef = useRef<Set<string>>(new Set());
-  const guaranteedAssistantMessageQueueRef = useRef<Array<{ message: string; analysis: ConciergeAnalysis | null }>>([]);
   const checkingReminderSentRef = useRef(false);
   const operatorTransferTriggeredRef = useRef(false);
-  const stopCallAfterEndMessageRef = useRef(false);
+  const waitingForAdditionalRequestRef = useRef(false);
   const pendingAnalysisRef = useRef<ConciergeAnalysis | null>(null);
   const lastAssistantTextRef = useRef("");
   const lastAssistantResponseMessageRef = useRef("");
@@ -324,6 +378,9 @@ export default function Home() {
   const lastAcceptedTranscriptRef = useRef("");
   const lastAcceptedAtRef = useRef(0);
   const latestFinalTranscriptRef = useRef("");
+  const sttTurnBufferRef = useRef<string[]>([]);
+  const sttLastBufferedAtRef = useRef(0);
+  const sttListenerEnabledRef = useRef(false);
   const lastProcessedTranscriptRef = useRef("");
   const ignoredEchoCountRef = useRef(0);
   const expectedAssistantMessageRef = useRef("");
@@ -333,6 +390,10 @@ export default function Home() {
   const demoConfirmationStepRef = useRef<DemoConfirmationStep>("content");
   const confirmedSlotsRef = useRef<ServiceSlots>({});
   const lastCompletedServiceRef = useRef<CompletedService | null>(null);
+  const demoCompletedLockedRef = useRef(false);
+  const completedAtRef = useRef<number | null>(null);
+  const ignoreUserInputUntilRef = useRef<number>(0);
+  const lastAssistantExactTextRef = useRef("");
 
   const sortedLogs = useMemo(() => logs.slice(-14), [logs]);
 
@@ -357,23 +418,6 @@ export default function Home() {
     setDemoPhaseState(next);
   }
 
-  function updateSlots(next: ServiceSlots) {
-    confirmedSlotsRef.current = { ...confirmedSlotsRef.current, ...next };
-    setConfirmedSlots(confirmedSlotsRef.current);
-  }
-
-  function ensureProviderMention(message: string, analysisValue?: ConciergeAnalysis | null) {
-    return policyEnsureProviderMention(message, analysisValue);
-  }
-
-  function buildNextDetailQuestion(analysisValue: ConciergeAnalysis, field: string) {
-    if (analysisValue.serviceType === "taxi") return `${field}를 말씀해 주세요.`;
-    if (analysisValue.serviceType === "hospital_reservation" && field.includes("병원")) return `${SPOKEN_BRAND_NAME} 제휴 병원 확인을 위해 원하시는 진료과와 지역을 말씀해 주세요.`;
-    if (analysisValue.serviceType === "car_accessory_installation" && field === "차량 종류") return "시공할 차량 종류를 말씀해 주세요.";
-    if (analysisValue.serviceType === "car_accessory_installation" && field === "시공 지역") return "원하시는 시공 지역을 말씀해 주세요.";
-    return `${field}를 말씀해 주세요.`;
-  }
-
   function normalizeDemoText(text: string) {
     return text.trim().toLowerCase().replace(/[.,!?。？！~～]/g, "").replace(/\s+/g, " ");
   }
@@ -382,22 +426,94 @@ export default function Home() {
     return message.replaceAll(DISPLAY_BRAND_NAME, SPOKEN_BRAND_NAME);
   }
 
-  function buildFixedVoiceInstructions(message: string) {
-    const fixed = toSpokenBrandName(message).trim();
-
-    return [
-      FIXED_VOICE_STYLE_INSTRUCTIONS,
-      "",
-      fixed
-    ].join("\n");
-  }
-
   function getDemoScriptKey(serviceType: DemoServiceType): DemoScriptServiceType {
     return serviceType in DEMO_SCRIPTS.start ? serviceType as DemoScriptServiceType : "unknown";
   }
 
-  function isDemoAssistantOutputLocked() {
-    return isGreetingInProgressRef.current || demoPhaseRef.current !== "idle" || Boolean(activeDemoServiceRef.current);
+  function isCompletedHardLocked() {
+    return demoCompletedLockedRef.current || demoPhaseRef.current === "ending";
+  }
+
+  function clearAssistantEchoReleaseTimer() {
+    if (assistantEchoReleaseTimerRef.current) {
+      window.clearTimeout(assistantEchoReleaseTimerRef.current);
+      assistantEchoReleaseTimerRef.current = null;
+    }
+  }
+
+  function clearFollowupIdleTimer() {
+    if (followupIdleTimerRef.current) {
+      window.clearTimeout(followupIdleTimerRef.current);
+      followupIdleTimerRef.current = null;
+    }
+  }
+
+  function clearSttTurn() {
+    sttTurnBufferRef.current = [];
+    sttLastBufferedAtRef.current = 0;
+    latestFinalTranscriptRef.current = "";
+  }
+
+  function startFollowupIdleTimer() {
+    clearFollowupIdleTimer();
+    followupIdleTimerRef.current = window.setTimeout(() => {
+      followupIdleTimerRef.current = null;
+      if (demoPhaseRef.current !== "followup_listening") return;
+      emitDemoAssistantExact(SCRIPT_TEMPLATES.followupIdleReminder, "followup-idle-reminder");
+      followupIdleTimerRef.current = window.setTimeout(() => {
+        followupIdleTimerRef.current = null;
+        if (demoPhaseRef.current !== "followup_listening") return;
+        enterEnding();
+      }, FOLLOWUP_FINAL_TIMEOUT_MS);
+    }, FOLLOWUP_IDLE_TIMEOUT_MS);
+  }
+
+  function clearPendingCustomerTurn() {
+    clearPendingResponseTimer();
+    clearSttTurn();
+    lastValidUserTurnRef.current = "";
+    pendingAnalysisRef.current = null;
+    fallbackPromptCountRef.current = 0;
+    userSpeakingRef.current = false;
+  }
+
+  function appendFinalTranscriptSegment(text: string) {
+    const clean = normalizeSttSegment(text);
+    if (!clean) return;
+    sttTurnBufferRef.current.push(clean);
+    sttLastBufferedAtRef.current = Date.now();
+    latestFinalTranscriptRef.current = peekBufferedCustomerTurn();
+  }
+
+  function enforceCompletedHardLock(source: string) {
+    sttListenerEnabledRef.current = false;
+    clearDemoPendingTimers();
+    clearPendingCustomerTurn();
+    stopWatchdog();
+    setMicrophoneEnabled(false, "completed");
+    updateAppStatus("AI READY");
+    setVoiceState("완료");
+    console.log("[DEMO_FLOW] completed_hard_lock_enforced", { source });
+  }
+
+  function isBlockedAfterCompleted(source: string) {
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock(source);
+      console.log("[DEMO_FLOW] blocked_after_completed", { source });
+      return true;
+    }
+    return false;
+  }
+
+  function cancelRealtimeModelOutput(source: string) {
+    const dc = dcRef.current;
+    if (source === "response.created" && dc?.readyState === "open") {
+      dc.send(JSON.stringify({ type: "response.cancel" }));
+    }
+    isResponseInProgressRef.current = false;
+    assistantDraftRef.current = "";
+    setAssistantDraft("");
+    console.warn("[REALTIME_SENSOR_ONLY] ignored_model_output", { source });
   }
 
   function isDemoPositiveIntent(text: string) {
@@ -420,6 +536,38 @@ export default function Home() {
 
   function isDemoCompletedCloseIntent(text: string) {
     return isDemoEndIntent(text);
+  }
+
+  function isFollowUpEndIntent(text: string) {
+    const normalized = normalizeDemoText(text);
+    return /^(없어|없어요|됐어|됐어요|괜찮아|괜찮아요|끝|종료|그만|마무리|통화 종료|없습니다|됐습니다|괜찮습니다|이제 없어|더 없어)$/.test(normalized);
+  }
+
+  function isFollowUpNewServiceIntent(text: string) {
+    const normalized = normalizeDemoText(text);
+    if (detectDemoServiceType(normalized) !== "unknown") return true;
+    return /(그리고|추가로|또|하나 더|아 맞다|이번엔|이번에는|그럼|그러면|이어서|다음으로)/.test(normalized);
+  }
+
+  function normalizeForEchoGuard(value: string) {
+    return value
+      .replace(/\s+/g, "")
+      .replace(/[.,!?~]/g, "")
+      .trim();
+  }
+
+  function isAssistantEchoTranscript(text: string) {
+    const clean = normalizeForEchoGuard(text);
+    const last = normalizeForEchoGuard(lastAssistantExactTextRef.current);
+
+    if (!clean || !last) return false;
+
+    if (Date.now() < ignoreUserInputUntilRef.current) return true;
+
+    if (last.includes(clean) && clean.length >= 6) return true;
+    if (clean.includes(last.slice(0, Math.min(last.length, 20))) && clean.length >= 6) return true;
+
+    return false;
   }
 
   function isDemoForbiddenSlotUtterance(text: string) {
@@ -807,7 +955,7 @@ export default function Home() {
       return [
         "아이나비 M 택시 배차 요청이 성공적으로 접수되었습니다.",
         detail,
-        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+        FOLLOWUP_PROMPT
       ].join(" ");
     }
 
@@ -815,7 +963,7 @@ export default function Home() {
       return [
         "바벨피시 제휴 병원 예약 요청이 성공적으로 접수되었습니다.",
         detail,
-        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+        FOLLOWUP_PROMPT
       ].join(" ");
     }
 
@@ -823,7 +971,7 @@ export default function Home() {
       return [
         "바벨피시 제휴 자동차 서비스 업체 예약 요청이 성공적으로 접수되었습니다.",
         detail,
-        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+        FOLLOWUP_PROMPT
       ].join(" ");
     }
 
@@ -831,7 +979,7 @@ export default function Home() {
       return [
         "바벨피시 제휴 검사소 예약 요청이 성공적으로 접수되었습니다.",
         detail,
-        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+        FOLLOWUP_PROMPT
       ].join(" ");
     }
 
@@ -839,7 +987,7 @@ export default function Home() {
       return [
         "아이나비 블랙박스 장착 요청이 성공적으로 접수되었습니다.",
         detail,
-        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+        FOLLOWUP_PROMPT
       ].join(" ");
     }
 
@@ -847,7 +995,7 @@ export default function Home() {
       return [
         "칼트윈 틴팅 시공 요청이 성공적으로 접수되었습니다.",
         detail,
-        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+        FOLLOWUP_PROMPT
       ].join(" ");
     }
 
@@ -855,14 +1003,14 @@ export default function Home() {
       return [
         "바벨피시 제휴 협력사 구매 요청이 성공적으로 접수되었습니다.",
         detail,
-        "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+        FOLLOWUP_PROMPT
       ].join(" ");
     }
 
     return [
       "바벨피시 제휴 서비스 요청이 성공적으로 접수되었습니다.",
       detail,
-      "추가로 필요하신 서비스가 있으시면 말씀해 주세요."
+      FOLLOWUP_PROMPT
     ].join(" ");
   }
 
@@ -918,15 +1066,69 @@ export default function Home() {
     return buildDemoMissingQuestion(service);
   }
 
-  function speakExactText(message: string) {
+  function clearDemoPendingTimers() {
+    clearAssistantEchoReleaseTimer();
+    clearFollowupIdleTimer();
+    if (completionTimerRef.current) {
+      window.clearTimeout(completionTimerRef.current);
+      completionTimerRef.current = null;
+    }
+    if (pendingResponseTimerRef.current) {
+      window.clearTimeout(pendingResponseTimerRef.current);
+      pendingResponseTimerRef.current = null;
+    }
+    if (responseTimerRef.current) {
+      window.clearTimeout(responseTimerRef.current);
+      responseTimerRef.current = null;
+    }
+    if (greetingTimeoutRef.current) {
+      window.clearTimeout(greetingTimeoutRef.current);
+      greetingTimeoutRef.current = null;
+    }
+    completionTimerServiceIdRef.current = null;
+    expectedAssistantMessageRef.current = "";
+    assistantDraftRef.current = "";
+    setAssistantDraft("");
+    lastValidUserTurnRef.current = "";
+    fallbackPromptCountRef.current = 0;
+    isResponseInProgressRef.current = false;
+  }
+
+  function releaseDemoCompletedLockByStartButton() {
+    demoCompletedLockedRef.current = false;
+    waitingForAdditionalRequestRef.current = false;
+    completedAtRef.current = null;
+    ignoreUserInputUntilRef.current = 0;
+    lastAssistantExactTextRef.current = "";
+    clearDemoPendingTimers();
+    clearPendingCustomerTurn();
+    assistantEchoGuardUntilRef.current = 0;
+    lastProcessedTranscriptRef.current = "";
+    emittedAssistantMessageKeysRef.current = new Set();
+    console.log("[DEMO_FLOW] completed_lock_released_by_start_button");
+  }
+
+  function lockUserInputForAssistantTurn() {
+    ignoreUserInputUntilRef.current = Date.now() + 2000;
+  }
+
+  function speakExactText(message: string, allowAfterCompleted = false, onDone?: () => void) {
+    if (isCompletedHardLocked() && !allowAfterCompleted) {
+      console.log("[DEMO_FLOW] blocked_exact_speech_after_completed", { message });
+      return;
+    }
+
     const fixed = toSpokenBrandName(message).trim();
     if (!fixed) return;
 
     lastAssistantTextRef.current = fixed;
     lastAssistantResponseMessageRef.current = fixed;
+    lastAssistantExactTextRef.current = fixed;
     lastAssistantSpokeAtRef.current = Date.now();
+    lockUserInputForAssistantTurn();
 
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      onDone?.();
       return;
     }
 
@@ -938,8 +1140,14 @@ export default function Home() {
     utterance.pitch = 1;
 
     utterance.onstart = () => {
+      if (isCompletedHardLocked() && !allowAfterCompleted) {
+        window.speechSynthesis.cancel();
+        return;
+      }
       lastAssistantStartedAtRef.current = Date.now();
       lastAssistantMessageAtRef.current = Date.now();
+      lastAssistantExactTextRef.current = fixed;
+      lockUserInputForAssistantTurn();
       isAssistantSpeakingRef.current = true;
       isAssistantAudioPlayingRef.current = true;
       isResponseInProgressRef.current = false;
@@ -950,11 +1158,13 @@ export default function Home() {
     };
 
     const finish = () => {
+      lockUserInputForAssistantTurn();
       isGreetingInProgressRef.current = false;
       isAssistantSpeakingRef.current = false;
       isAssistantAudioPlayingRef.current = false;
       isResponseInProgressRef.current = false;
       markAssistantSpeakingEnd();
+      onDone?.();
     };
 
     utterance.onend = finish;
@@ -963,18 +1173,26 @@ export default function Home() {
     window.speechSynthesis.speak(utterance);
   }
 
-  function emitDemoAssistantExact(message: string, key?: string) {
+  function emitDemoAssistantExact(message: string, key?: string, allowAfterCompleted = false, onDone?: () => void) {
+    if (isCompletedHardLocked() && !allowAfterCompleted) {
+      console.log("[DEMO_FLOW] blocked_exact_message_after_completed", { key, message });
+      return;
+    }
+
     const fixed = toSpokenBrandName(message).trim();
     if (!fixed) return;
     const dedupeKey = key ?? fixed;
-    if (emittedAssistantMessageKeysRef.current.has(dedupeKey)) return;
+    if (emittedAssistantMessageKeysRef.current.has(dedupeKey)) {
+      onDone?.();
+      return;
+    }
     emittedAssistantMessageKeysRef.current.add(dedupeKey);
     setAssistHint(fixed);
     lastAssistantResponseMessageRef.current = fixed;
     expectedAssistantMessageRef.current = fixed;
     appendLog("assistant", fixed);
     console.log("[DEMO] emitExact", fixed);
-    speakExactText(fixed);
+    speakExactText(fixed, allowAfterCompleted, onDone);
   }
 
   function enterDemoCollecting(service: DemoService, message: string) {
@@ -1033,6 +1251,10 @@ export default function Home() {
 
   function startSuccessTimer(service: DemoService) {
     if (!service.id) return;
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("startSuccessTimer");
+      return;
+    }
     if (completionTimerRef.current) {
       window.clearTimeout(completionTimerRef.current);
     }
@@ -1042,6 +1264,10 @@ export default function Home() {
     completionTimerRef.current = window.setTimeout(() => {
       completionTimerRef.current = null;
       completionTimerServiceIdRef.current = null;
+      if (isCompletedHardLocked()) {
+        enforceCompletedHardLock("startSuccessTimer:callback");
+        return;
+      }
       completeService(service);
     }, DEMO_SUCCESS_DELAY_MS);
   }
@@ -1068,7 +1294,7 @@ export default function Home() {
     setStatus("operator_transfer");
     updateAppStatus("SERVER ERROR");
     setSatisfactionState("시스템 장애 - 상담원 최우선 수기 접수 대기(Priority 1)");
-    setAssistHint("수기 접수 대기 상태입니다. 접수 맥락을 함께 전달했습니다.");
+    setAssistHint(SCRIPT_TEMPLATES.operatorTransferHint);
     appendLog("event", `상담원 이관: ${payload.failureReason} / 긴급도 ${payload.urgency}`);
     console.warn("[HANDOVER] operator transfer", payload);
     if (typeof window !== "undefined") {
@@ -1081,12 +1307,13 @@ export default function Home() {
     if (completedServiceIdsRef.current.has(service.id)) return;
     completedServiceIdsRef.current.add(service.id);
     console.log("[DEMO] completeService", service.id, service.serviceType);
-    completionTimerRef.current = null;
-    completionTimerServiceIdRef.current = null;
+    clearDemoPendingTimers();
+    clearPendingCustomerTurn();
     checkingServiceIdRef.current = null;
     const message = buildDemoSuccessMessage(service);
-    setDemoPhase("completed");
-    setServiceStatus("completed");
+    activeDemoServiceRef.current = null;
+    setDemoPhase("followup_listening");
+    setServiceStatus("listening");
     setStatus("completed");
     setIsWaitingDemoCompletion(false);
     setDemoCompletionHint(message);
@@ -1100,12 +1327,35 @@ export default function Home() {
     };
     lastCompletedServiceRef.current = completed;
     setLastCompletedService(completed);
-    setSatisfactionState("추가 요청 확인 중");
-    setCompletedServices((current) => [completed, ...current]);
-    emitDemoAssistantExact(message, `success:${service.id}`);
+    setSatisfactionState("후속 요청 대기 중");
+    demoCompletedLockedRef.current = false;
+    waitingForAdditionalRequestRef.current = true;
+    completedAtRef.current = Date.now();
+    ignoreUserInputUntilRef.current = Date.now() + ASSISTANT_ECHO_GUARD_MS;
+    sttListenerEnabledRef.current = true;
+    setMicrophoneEnabled(false, "auto");
+    updateAppStatus("AI SPEAKING");
+    setVoiceState("AI 응답 중");
+    console.log("[DEMO_FLOW] completed_followup_listening", {
+      serviceId: service.id,
+      serviceType: service.serviceType
+    });
+    emitDemoAssistantExact(message, `success:${service.id}`, true);
   }
 
   function beginDemoService(text: string) {
+    console.log("[DEMO_FLOW] beginDemoService", {
+      text,
+      phase: demoPhaseRef.current,
+      locked: demoCompletedLockedRef.current
+    });
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("beginDemoService");
+      console.log("[DEMO_FLOW] blocked_begin_after_completed", { text });
+      return;
+    }
+    waitingForAdditionalRequestRef.current = false;
+    clearFollowupIdleTimer();
     const service = makeDemoService(text);
     if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
     completionTimerRef.current = null;
@@ -1200,19 +1450,86 @@ export default function Home() {
     emitDemoAssistantExact(buildDemoMissingQuestion(service));
   }
 
-  function finishDemoConversation() {
+  function enterEnding() {
     activeDemoServiceRef.current = null;
-    setDemoPhase("idle");
+    waitingForAdditionalRequestRef.current = false;
+    demoCompletedLockedRef.current = true;
+    sttListenerEnabledRef.current = false;
+    clearDemoPendingTimers();
+    clearPendingCustomerTurn();
+    stopWatchdog();
+    setDemoPhase("ending");
     setServiceStatus("standby");
     setStatus("standby");
-    updateAppStatus("AI READY");
-    setVoiceState("대기 중");
+    updateAppStatus("AI SPEAKING");
+    setVoiceState("AI 응답 중");
     setMicrophoneEnabled(false, "auto");
-    stopCallAfterEndMessageRef.current = true;
-    emitDemoAssistantExact(DEMO_SCRIPTS.end, "end");
+    emitDemoAssistantExact(DEMO_SCRIPTS.end, "end", true, () => stopCall(true));
   }
 
-  function handleDemoConversation(text: string) {
+  function finishDemoConversation() {
+    enterEnding();
+  }
+
+  function handleDemoConversation(customerAnalysis: CustomerUtteranceAnalysis) {
+    const text = customerAnalysis.transcript;
+    const cleanText = text.trim();
+    if (!cleanText) return;
+
+    if (demoPhaseRef.current === "followup_listening") {
+      clearFollowupIdleTimer();
+      if (isAssistantEchoTranscript(cleanText)) {
+        startFollowupIdleTimer();
+        return;
+      }
+      if (Date.now() < ignoreUserInputUntilRef.current) {
+        startFollowupIdleTimer();
+        return;
+      }
+
+      if (isFollowUpEndIntent(cleanText)) {
+        enterEnding();
+        return;
+      }
+
+      if (isFollowUpNewServiceIntent(cleanText)) {
+        waitingForAdditionalRequestRef.current = false;
+        beginDemoService(cleanText);
+        return;
+      }
+
+      emitDemoAssistantExact(SCRIPT_TEMPLATES.followupGuide, "followup-guide");
+      startFollowupIdleTimer();
+      return;
+    }
+
+    if (isCompletedHardLocked()) {
+      console.log("[DEMO_FLOW] completed_guard", {
+        text: cleanText,
+        phase: demoPhaseRef.current,
+        locked: demoCompletedLockedRef.current
+      });
+      enforceCompletedHardLock("handleDemoConversation");
+      return;
+    }
+
+    if (isAssistantEchoTranscript(cleanText)) {
+      console.log("[DEMO_FLOW] ignored_assistant_echo", {
+        text: cleanText,
+        lastAssistant: lastAssistantExactTextRef.current,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
+    if (Date.now() < ignoreUserInputUntilRef.current) {
+      console.log("[DEMO_FLOW] ignored_input_cooldown", {
+        text: cleanText,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
     if (demoPhaseRef.current === "checking") {
       if (isDemoEndIntent(text)) {
         if (completionTimerRef.current) window.clearTimeout(completionTimerRef.current);
@@ -1236,20 +1553,6 @@ export default function Home() {
       return;
     }
 
-    if (demoPhaseRef.current === "completed") {
-      if (isDemoCompletedCloseIntent(text)) {
-        finishDemoConversation();
-        return;
-      }
-      const detected = detectDemoServiceType(text);
-      if (detected !== "unknown") {
-        beginDemoService(text);
-        return;
-      }
-      emitDemoAssistantExact(DEMO_SCRIPTS.start.unknown);
-      return;
-    }
-
     const active = activeDemoServiceRef.current;
     if (active && demoPhaseRef.current === "confirming") {
       if (isDemoPositiveIntent(text)) {
@@ -1261,10 +1564,10 @@ export default function Home() {
         setServiceStatus("listening");
         setStatus("draft");
         updateAppStatus("LISTENING");
-        emitDemoAssistantExact("다시 확인하겠습니다. 변경하실 내용을 말씀해 주세요.", `confirm-retry:${active.id}`);
+        emitDemoAssistantExact(SCRIPT_TEMPLATES.confirmRetry, `confirm-retry:${active.id}`);
         return;
       }
-      emitDemoAssistantExact("확인해 주시면 진행하겠습니다.", `confirm-prompt:${active.id}`);
+      emitDemoAssistantExact(SCRIPT_TEMPLATES.confirmPrompt, `confirm-prompt:${active.id}`);
       return;
     }
 
@@ -1273,7 +1576,9 @@ export default function Home() {
       enterDemoChecking(active);
       return;
     }
-    const detected = detectDemoServiceType(text);
+    const detected = customerAnalysis.intent === "confirm" || customerAnalysis.intent === "restart" || customerAnalysis.intent === "end"
+      ? "unknown"
+      : customerAnalysis.intent;
     if (!active || (detected !== "unknown" && !isSameDemoServiceRequest(text, active))) {
       beginDemoService(text);
       return;
@@ -1293,23 +1598,35 @@ export default function Home() {
   }
 
   function scheduleGreetingWhenReady() {
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("scheduleGreetingWhenReady");
+      return;
+    }
     if (hasSentGreetingRef.current || isGreetingInProgressRef.current) return;
-    if (!isDataChannelReadyRef.current || !isRemoteAudioReadyRef.current || !isInitialAudioReadyRef.current) return;
+    if (!isDataChannelReadyRef.current || !sttListenerEnabledRef.current) return;
     if (!dcRef.current || dcRef.current.readyState !== "open") return;
-    if (!audioRef.current || !pcRef.current || ["failed", "closed"].includes(pcRef.current.connectionState)) return;
+    if (!pcRef.current || ["failed", "closed"].includes(pcRef.current.connectionState)) return;
     if (isResponseInProgressRef.current) return;
     if (greetingTimeoutRef.current) window.clearTimeout(greetingTimeoutRef.current);
     greetingTimeoutRef.current = window.setTimeout(() => {
       greetingTimeoutRef.current = null;
+      if (isCompletedHardLocked()) {
+        enforceCompletedHardLock("scheduleGreetingWhenReady:callback");
+        return;
+      }
       sendInitialGreetingOnce();
     }, GREETING_START_DELAY_MS);
   }
 
   function sendInitialGreetingOnce(retryMessage?: string) {
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("sendInitialGreetingOnce");
+      return;
+    }
     if (hasSentGreetingRef.current && !retryMessage) return;
     if (isGreetingInProgressRef.current || isResponseInProgressRef.current) return;
     const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open" || !audioRef.current) return;
+    if (!dc || dc.readyState !== "open") return;
     hasSentGreetingRef.current = true;
     greetingSentRef.current = true;
     isGreetingInProgressRef.current = true;
@@ -1329,6 +1646,10 @@ export default function Home() {
     if (greetingTimeoutRef.current) window.clearTimeout(greetingTimeoutRef.current);
     greetingTimeoutRef.current = window.setTimeout(() => {
       greetingTimeoutRef.current = null;
+      if (isCompletedHardLocked()) {
+        enforceCompletedHardLock("startGreetingWatchdog:callback");
+        return;
+      }
       if (!isGreetingInProgressRef.current) return;
       console.warn("Initial greeting stuck. Recovering.");
       isGreetingInProgressRef.current = false;
@@ -1368,6 +1689,7 @@ export default function Home() {
   }
 
   function checkStuckState() {
+    if (isBlockedAfterCompleted("checkStuckState")) return;
     const now = Date.now();
     if (demoPhaseRef.current === "checking") {
       // 제휴사 확인 중에는 내부 완료 타이머만 신뢰한다.
@@ -1385,7 +1707,7 @@ export default function Home() {
       forceRecoverToListening("Echo guard stuck");
       return;
     }
-    if (demoPhaseRef.current === "greeting" || demoPhaseRef.current === "collecting" || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed") {
+    if (demoPhaseRef.current === "greeting" || demoPhaseRef.current === "collecting" || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed" || demoPhaseRef.current === "followup_listening" || demoPhaseRef.current === "ending") {
       // 데모 대화 중에는 과거 analysis 기반 fallback을 쓰지 않는다.
       // 이전 택시 analysis가 병원/틴팅 흐름에 섞여 나오는 문제를 막는다.
       return;
@@ -1395,15 +1717,15 @@ export default function Home() {
       const assistantWait = now - lastAssistantMessageAtRef.current;
       if (userWait > USER_TURN_RESPONSE_TIMEOUT_MS && assistantWait > USER_TURN_RESPONSE_TIMEOUT_MS) {
         fallbackPromptCountRef.current += 1;
-        const active = confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis;
-        const fallback = buildContextFallback(active);
         lastValidUserTurnRef.current = "";
-        scheduleAssistantResponse(fallback, 0, active.serviceType === "unknown" ? null : active);
+        setAssistHint(SCRIPT_TEMPLATES.waitingForCustomer);
+        console.debug("[STATE_MACHINE_ONLY] skipped_context_fallback");
       }
     }
   }
 
   function forceRecoverToListening(reason: string) {
+    if (isBlockedAfterCompleted("forceRecoverToListening")) return;
     console.warn(reason);
     isResponseInProgressRef.current = false;
     isAssistantSpeakingRef.current = false;
@@ -1423,16 +1745,12 @@ export default function Home() {
     setVoiceState("고객 말씀 대기 중");
     if (reason === "AI response stuck" && lastAssistantResponseMessageRef.current && assistantRetryCountRef.current < 1) {
       assistantRetryCountRef.current += 1;
-      const active = getActiveAnalysis();
-      scheduleAssistantResponse(`다시 안내드리겠습니다. ${lastAssistantResponseMessageRef.current}`, 0, active.serviceType === "unknown" ? null : active);
+      console.debug("[STATE_MACHINE_ONLY] skipped_ai_retry_response");
     }
   }
 
-  function buildContextFallback(active: ConciergeAnalysis) {
-    return stateBuildContextFallback(active);
-  }
-
   async function startCall() {
+    releaseDemoCompletedLockByStartButton();
     setError(null);
     setConnection("마이크 권한 요청 중");
     updateAppStatus("CONNECTING");
@@ -1465,6 +1783,7 @@ export default function Home() {
     currentAppStatusRef.current = "CONNECTING";
     fallbackPromptCountRef.current = 0;
     operatorTransferTriggeredRef.current = false;
+    waitingForAdditionalRequestRef.current = false;
     isAssistantSpeakingRef.current = false;
     isAssistantAudioPlayingRef.current = false;
     isResponseInProgressRef.current = false;
@@ -1480,6 +1799,9 @@ export default function Home() {
     lastAcceptedTranscriptRef.current = "";
     lastAcceptedAtRef.current = 0;
     latestFinalTranscriptRef.current = "";
+    sttTurnBufferRef.current = [];
+    sttLastBufferedAtRef.current = 0;
+    sttListenerEnabledRef.current = false;
     lastProcessedTranscriptRef.current = "";
     ignoredEchoCountRef.current = 0;
     expectedAssistantMessageRef.current = "";
@@ -1487,7 +1809,7 @@ export default function Home() {
     setIsManualMode(false);
     isManualModeRef.current = false;
     setVoiceState("대기 중");
-    setAssistHint("AI 첫 인사 후 자동으로 고객 말씀 대기 상태가 됩니다.");
+    setAssistHint(SCRIPT_TEMPLATES.initialGreetingHint);
     setUnderstoodText("");
     setFinalSummary("");
     setServiceStatus("listening");
@@ -1531,17 +1853,14 @@ export default function Home() {
       pc.onconnectionstatechange = () => setConnection(pc.connectionState);
 
       const audio = new Audio();
-      audio.autoplay = true;
+      audio.autoplay = false;
+      audio.muted = true;
       audioRef.current = audio;
       pc.ontrack = (event) => {
         audio.srcObject = event.streams[0];
         isRemoteAudioReadyRef.current = true;
-        void audio.play()
-          .catch((playError) => console.warn("Initial remote audio play was delayed", playError))
-          .finally(() => {
-            isInitialAudioReadyRef.current = true;
-            scheduleGreetingWhenReady();
-          });
+        isInitialAudioReadyRef.current = true;
+        scheduleGreetingWhenReady();
       };
 
       const mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -1556,6 +1875,7 @@ export default function Home() {
         track.enabled = false;
       });
       mediaStream.getAudioTracks().forEach((track) => pc.addTrack(track, mediaStream));
+      sttListenerEnabledRef.current = true;
 
       const dc = pc.createDataChannel("oai-events");
       dcRef.current = dc;
@@ -1604,19 +1924,33 @@ export default function Home() {
 
   function handleRealtimeEvent(raw: string) {
     const event = JSON.parse(raw);
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock(`realtime:${event.type ?? "unknown"}`);
+      return;
+    }
+
+    if (String(event.type ?? "").startsWith("response.")) {
+      cancelRealtimeModelOutput(String(event.type ?? "response"));
+      return;
+    }
+
     if (event.type === "input_audio_buffer.speech_started") {
+      if (!sttListenerEnabledRef.current) return;
       if (isGreetingInProgressRef.current || isAssistantTurnActive() || isInsideAssistantEchoGuard()) {
         ignoredEchoCountRef.current += 1;
         setVoiceState("에코 차단 중");
         return;
       }
       userSpeakingRef.current = true;
+      sttTurnBufferRef.current = [];
+      latestFinalTranscriptRef.current = "";
       clearPendingResponseTimer();
       setVoiceState("고객 말씀 대기 중");
       updateAppStatus("LISTENING");
       return;
     }
     if (event.type === "input_audio_buffer.speech_stopped") {
+      if (!sttListenerEnabledRef.current) return;
       userSpeakingRef.current = false;
       lastUserSpeechStoppedAtRef.current = Date.now();
       if (isGreetingInProgressRef.current || isAssistantTurnActive() || isInsideAssistantEchoGuard()) return;
@@ -1624,71 +1958,7 @@ export default function Home() {
       return;
     }
     if (event.type === "conversation.item.input_audio_transcription.completed") {
-      const text = String(event.transcript ?? "");
-      const allowControlTranscript = isDemoControlTranscript(text);
-      if (isGreetingInProgressRef.current || isAssistantTurnActive()) return;
-      if (!allowControlTranscript && isInsideAssistantEchoGuard()) return;
-      latestFinalTranscriptRef.current = text;
-      if (!userSpeakingRef.current) scheduleUserTurnProcessing();
-    }
-    if (event.type === "response.created") {
-      markAssistantSpeakingStart(false);
-    }
-    if (event.type === "response.audio.delta") {
-      markAssistantSpeakingStart(true);
-    }
-    if (event.type === "response.audio_transcript.delta" || event.type === "response.output_text.delta") {
-      markAssistantSpeakingStart(false);
-      if (event.type === "response.audio_transcript.delta" || event.type === "response.output_text.delta") {
-        const nextDraft = `${assistantDraftRef.current}${event.delta ?? ""}`;
-        if (!isDemoAssistantOutputLocked()) {
-          assistantDraftRef.current = nextDraft;
-          setAssistantDraft(nextDraft);
-        }
-      }
-    }
-    if (event.type === "response.audio_transcript.done" || event.type === "response.output_text.done") {
-      const text = String(event.transcript ?? event.text ?? assistantDraftRef.current);
-      const expected = expectedAssistantMessageRef.current;
-      if (expected) {
-        lastAssistantTextRef.current = expected;
-        expectedAssistantMessageRef.current = "";
-      } else if (isDemoAssistantOutputLocked()) {
-        lastAssistantTextRef.current = lastAssistantResponseMessageRef.current;
-      } else {
-        appendLog("assistant", text);
-        lastAssistantTextRef.current = text;
-      }
-      lastAssistantSpokeAtRef.current = Date.now();
-      assistantDraftRef.current = "";
-      setAssistantDraft("");
-    }
-    if (event.type === "response.audio.done") {
-      isAssistantAudioPlayingRef.current = false;
-      return;
-    }
-    if (event.type === "response.done") {
-      if (isGreetingInProgressRef.current) {
-        if (expectedAssistantMessageRef.current) {
-          lastAssistantTextRef.current = expectedAssistantMessageRef.current;
-          expectedAssistantMessageRef.current = "";
-        }
-        completeGreetingTurn();
-        return;
-      }
-      isResponseInProgressRef.current = false;
-      isAssistantSpeakingRef.current = false;
-      isAssistantAudioPlayingRef.current = false;
-      if (expectedAssistantMessageRef.current) {
-        lastAssistantTextRef.current = expectedAssistantMessageRef.current;
-        expectedAssistantMessageRef.current = "";
-      }
-      markAssistantSpeakingEnd();
-      flushGuaranteedAssistantMessage();
-      if (stopCallAfterEndMessageRef.current && guaranteedAssistantMessageQueueRef.current.length === 0) {
-        stopCallAfterEndMessageRef.current = false;
-        window.setTimeout(() => stopCall(true), 0);
-      }
+      enqueueFinalTranscript(String(event.transcript ?? ""));
     }
     if (event.type === "error") {
       const errorMessage = event.error?.message ?? "Realtime error";
@@ -1705,6 +1975,34 @@ export default function Home() {
 
   function processCustomerTranscript(text: string) {
     const trimmed = text.trim();
+
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("processCustomerTranscript");
+      return;
+    }
+
+    if (!trimmed) {
+      handleNoSpeech();
+      return;
+    }
+
+    if (isAssistantEchoTranscript(trimmed)) {
+      console.log("[DEMO_FLOW] ignored_assistant_echo", {
+        text: trimmed,
+        lastAssistant: lastAssistantExactTextRef.current,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
+    if (Date.now() < ignoreUserInputUntilRef.current) {
+      console.log("[DEMO_FLOW] ignored_input_cooldown", {
+        text: trimmed,
+        phase: demoPhaseRef.current
+      });
+      return;
+    }
+
     const withinSpeechWindow = !isManualModeRef.current || isListeningEnabledRef.current || Date.now() - lastPushToTalkAtRef.current < 5000;
 
     if (!withinSpeechWindow) {
@@ -1712,11 +2010,6 @@ export default function Home() {
         console.debug("Ignored transcript while listening is disabled", trimmed);
         setVoiceState("소음 무시");
       }
-      return;
-    }
-
-    if (!trimmed) {
-      handleNoSpeech();
       return;
     }
 
@@ -1749,6 +2042,9 @@ export default function Home() {
       return;
     }
 
+    const customerAnalysis = buildCustomerUtteranceAnalysis(trimmed);
+    console.debug("[CUSTOMER_ANALYSIS_JSON]", customerAnalysis);
+
     lastValidUserTurnRef.current = trimmed;
     lastUserTranscriptAtRef.current = Date.now();
     fallbackPromptCountRef.current = 0;
@@ -1764,37 +2060,39 @@ export default function Home() {
     noSpeechCountRef.current = 0;
     unclearCountRef.current = 0;
     noiseCountRef.current = 0;
-    handleDemoConversation(trimmed);
+    handleDemoConversation(customerAnalysis);
   }
 
   function handleNoSpeech() {
+    if (isBlockedAfterCompleted("handleNoSpeech")) return;
     noSpeechCountRef.current += 1;
     updateAppStatus("NO SPEECH");
     setVoiceState("말씀 미확인");
     const message = noSpeechCountRef.current >= 2
-      ? "말씀이 잘 들리지 않았습니다. 원하시는 서비스명만 다시 말씀해 주세요."
-      : "말씀이 확인되지 않았습니다. 다시 말씀해 주세요.";
+      ? SCRIPT_TEMPLATES.noSpeechRepeat
+      : SCRIPT_TEMPLATES.noSpeechFirst;
     appendLog("system", message);
     setAssistHint(message);
-    if (noSpeechCountRef.current <= 1) scheduleAssistantResponse("죄송합니다. 말씀이 잘 들리지 않았습니다. 다시 한 번 말씀해 주세요.");
+    if (noSpeechCountRef.current <= 1) emitDemoAssistantExact(SCRIPT_TEMPLATES.noSpeechVoice, "no-speech:first");
     if (noSpeechCountRef.current >= 3) {
       updateAppStatus("LISTENING");
-      setAssistHint("고객 말씀을 다시 기다리고 있습니다.");
+      setAssistHint(SCRIPT_TEMPLATES.waitingForCustomer);
     }
   }
 
   function handleUnclearSpeech() {
+    if (isBlockedAfterCompleted("handleUnclearSpeech")) return;
     unclearCountRef.current += 1;
     updateAppStatus("UNCLEAR SPEECH");
     setVoiceState("다시 말씀 필요");
     const message = unclearCountRef.current >= 2
-      ? "말씀하신 내용을 다시 확인하겠습니다. 원하시는 서비스와 장소를 한 번만 더 말씀해 주세요."
-      : "말씀하신 내용 파악이 어려웠습니다. 다시 말씀해 주세요.";
+      ? SCRIPT_TEMPLATES.unclearRepeat
+      : SCRIPT_TEMPLATES.unclearFirst;
     appendLog("system", message);
     setAssistHint(message);
-    if (unclearCountRef.current < 3) scheduleAssistantResponse(message);
+    if (unclearCountRef.current < 3) emitDemoAssistantExact(message, `unclear:${unclearCountRef.current}`);
     if (unclearCountRef.current >= 3) {
-      setAssistHint("상담원에게 이관합니다. 인식 실패 맥락을 함께 전달했습니다.");
+      setAssistHint(SCRIPT_TEMPLATES.operatorHandoffHint);
       if (!operatorTransferTriggeredRef.current) {
         triggerOperatorTransfer("STT 인식 실패", {
           failureReason: "STT 인식 실패",
@@ -1805,15 +2103,17 @@ export default function Home() {
   }
 
   function handleUnsupportedLanguage() {
+    if (isBlockedAfterCompleted("handleUnsupportedLanguage")) return;
     unclearCountRef.current += 1;
     updateAppStatus("UNSUPPORTED LANGUAGE");
     setVoiceState("다시 말씀 필요");
     appendLog("system", "지원하지 않는 언어이거나 말씀을 정확히 파악하지 못했습니다.");
-    setAssistHint("한국어, 영어 또는 일본어로 다시 말씀해 주세요.");
-    scheduleAssistantResponse("죄송합니다. 말씀을 정확히 파악하지 못했습니다. 한국어, 영어 또는 일본어로 다시 말씀해 주세요.");
+    setAssistHint(SCRIPT_TEMPLATES.unsupportedLanguageHint);
+    emitDemoAssistantExact(SCRIPT_TEMPLATES.unsupportedLanguage, "unsupported-language");
   }
 
   function handleNoiseLikeTranscript(text: string) {
+    if (isBlockedAfterCompleted("handleNoiseLikeTranscript")) return;
     noiseCountRef.current += 1;
     updateAppStatus("NO SPEECH");
     setVoiceState("소음 무시");
@@ -1821,16 +2121,20 @@ export default function Home() {
     const repeated = lastIgnoredTranscriptRef.current === normalized;
     lastIgnoredTranscriptRef.current = normalized;
     appendLog("system", repeated ? "주변 소음으로 판단해 분석하지 않았습니다." : "고객 말씀이 확인되지 않았습니다.");
-    setAssistHint("다시 한 번 또렷하게 말씀해 주세요.");
+    setAssistHint(SCRIPT_TEMPLATES.noiseHint);
     if (!repeated && noiseCountRef.current <= 1) {
-      scheduleAssistantResponse("죄송합니다. 말씀이 정확히 들리지 않았습니다. 다시 한 번 말씀해 주세요.");
+      emitDemoAssistantExact(SCRIPT_TEMPLATES.noiseRetry, "noise:first");
     }
     if (noiseCountRef.current >= 3) {
-      setAssistHint("고객 말씀을 다시 기다리고 있습니다.");
+      setAssistHint(SCRIPT_TEMPLATES.waitingForCustomer);
     }
   }
 
   function markAssistantSpeakingStart(audioPlaying = false) {
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("markAssistantSpeakingStart");
+      return;
+    }
     if (!lastAssistantStartedAtRef.current || !isResponseInProgressRef.current) {
       lastAssistantStartedAtRef.current = Date.now();
     }
@@ -1845,22 +2149,48 @@ export default function Home() {
   function markAssistantSpeakingEnd() {
     lastAssistantFinishedAtRef.current = Date.now();
     lastAssistantSpokeAtRef.current = Date.now();
+    clearAssistantEchoReleaseTimer();
+    if (isCompletedHardLocked()) {
+      assistantEchoGuardUntilRef.current = 0;
+      setMicrophoneEnabled(false, "completed");
+      updateAppStatus("AI READY");
+      setVoiceState("완료");
+      return;
+    }
     assistantEchoGuardUntilRef.current = Date.now() + ASSISTANT_ECHO_GUARD_MS;
     setMicrophoneEnabled(false, "auto");
     updateAppStatus("ECHO GUARD");
     setVoiceState("에코 차단 중");
-    window.setTimeout(() => {
+    assistantEchoReleaseTimerRef.current = window.setTimeout(() => {
+      assistantEchoReleaseTimerRef.current = null;
       if (Date.now() < assistantEchoGuardUntilRef.current) return;
+      if (isCompletedHardLocked()) {
+        setMicrophoneEnabled(false, "completed");
+        updateAppStatus("AI READY");
+        setVoiceState("완료");
+        return;
+      }
       if (demoPhaseRef.current === "idle") {
         setMicrophoneEnabled(false, "auto");
         setVoiceState("대기 중");
-        setAssistHint("서비스 대기 중입니다. 필요하실 때 서비스 시작 버튼을 눌러 주세요.");
+        setAssistHint(SCRIPT_TEMPLATES.standbyHint);
+        return;
+      }
+      if (demoPhaseRef.current === "followup_listening") {
+        if (!isManualModeRef.current && pcRef.current) {
+          setMicrophoneEnabled(true, "auto");
+          setVoiceState("고객 말씀 대기 중");
+          setAssistHint(SCRIPT_TEMPLATES.followupGuide);
+        } else {
+          setVoiceState(isListeningEnabledRef.current ? "듣는 중" : "대기 중");
+        }
+        if (!followupIdleTimerRef.current) startFollowupIdleTimer();
         return;
       }
       if (!isManualModeRef.current && pcRef.current) {
         setMicrophoneEnabled(true, "auto");
         setVoiceState("고객 말씀 대기 중");
-        setAssistHint("고객 말씀을 기다리고 있습니다. 인식이 안 되면 서비스 시작 버튼을 눌러 다시 시도해 주세요.");
+        setAssistHint(SCRIPT_TEMPLATES.autoListenHint);
       } else {
         setVoiceState(isListeningEnabledRef.current ? "듣는 중" : "대기 중");
       }
@@ -1890,22 +2220,150 @@ export default function Home() {
     });
   }
 
+  function normalizeSttSegment(text: string) {
+    return text.trim().replace(/\s+/g, " ");
+  }
+
+  function mergeSttTurnSegments(segments: string[]) {
+    const merged: string[] = [];
+    for (const segment of segments.map(normalizeSttSegment).filter(Boolean)) {
+      const previous = merged[merged.length - 1];
+      if (previous && (previous === segment || previous.includes(segment))) continue;
+      if (previous && segment.includes(previous)) {
+        merged[merged.length - 1] = segment;
+        continue;
+      }
+      merged.push(segment);
+    }
+    return merged.join(" ").replace(/\s+/g, " ").trim();
+  }
+
+  function peekBufferedCustomerTurn() {
+    return mergeSttTurnSegments(sttTurnBufferRef.current);
+  }
+
+  function consumeBufferedCustomerTurn() {
+    const text = peekBufferedCustomerTurn();
+    clearSttTurn();
+    return text;
+  }
+
+  function shouldFlushBufferedTurnSoon(text: string) {
+    const clean = text.trim();
+    if (!clean) return false;
+    if (demoPhaseRef.current === "followup_listening" && (isFollowUpEndIntent(clean) || isFollowUpNewServiceIntent(clean))) return true;
+    if (isDemoControlTranscript(clean) || isDemoEndIntent(clean) || isDemoRestartIntent(clean) || isDemoPositiveIntent(clean)) return true;
+    const active = activeDemoServiceRef.current;
+    if (!active) return detectDemoServiceType(clean) !== "unknown";
+    const projected: DemoService = {
+      ...active,
+      slots: sanitizeDemoSlots({ ...active.slots, ...extractDemoSlots(clean, active) })
+    };
+    return getDemoMissingFields(projected).length === 0;
+  }
+
+  function enqueueFinalTranscript(text: string) {
+    if (!sttListenerEnabledRef.current || isCompletedHardLocked()) {
+      if (isCompletedHardLocked()) enforceCompletedHardLock("enqueueFinalTranscript");
+      return;
+    }
+
+    const clean = normalizeSttSegment(text);
+    if (!clean) return;
+    if (isGreetingInProgressRef.current || isAssistantTurnActive()) return;
+    if (!isDemoControlTranscript(clean) && isInsideAssistantEchoGuard()) return;
+    if (isAssistantEchoTranscript(clean)) return;
+
+    appendFinalTranscriptSegment(clean);
+    if (!userSpeakingRef.current && lastUserSpeechStoppedAtRef.current > 0) {
+      scheduleUserTurnProcessing();
+    }
+  }
+
+  function buildCustomerUtteranceAnalysis(text: string): CustomerUtteranceAnalysis {
+    const transcriptValue = text.trim();
+    const active = activeDemoServiceRef.current;
+    const detected = detectDemoServiceType(transcriptValue);
+    const positive = isDemoPositiveIntent(transcriptValue);
+    const restart = isDemoRestartIntent(transcriptValue);
+    const end = isDemoEndIntent(transcriptValue);
+    const slotService = active ?? makeDemoService(transcriptValue);
+    const slots = extractDemoSlots(transcriptValue, slotService);
+    const projected: DemoService = {
+      ...slotService,
+      slots: sanitizeDemoSlots({ ...slotService.slots, ...slots })
+    };
+    const missing = getDemoMissingFields(projected);
+
+    let intent: CustomerUtteranceAnalysis["intent"] = detected;
+    if (positive) intent = "confirm";
+    if (restart) intent = "restart";
+    if (end) intent = "end";
+
+    let nextEvent: CustomerNextEvent = "ignore";
+    if (demoPhaseRef.current === "followup_listening" && isFollowUpEndIntent(transcriptValue)) nextEvent = "end_service";
+    else if (demoPhaseRef.current === "followup_listening" && isFollowUpNewServiceIntent(transcriptValue)) nextEvent = "start_service";
+    else if (end) nextEvent = "end_service";
+    else if (restart) nextEvent = "restart_service";
+    else if (positive) nextEvent = "confirm_service";
+    else if (!active && detected !== "unknown") nextEvent = "start_service";
+    else if (active && detected !== "unknown" && !isSameDemoServiceRequest(transcriptValue, active)) nextEvent = "start_service";
+    else if (Object.keys(slots).length > 0) nextEvent = missing.length === 0 ? "confirm_service" : "update_slots";
+    else if (detected !== "unknown") nextEvent = "start_service";
+
+    const confidence = end || restart || positive
+      ? 0.95
+      : detected !== "unknown"
+        ? 0.9
+        : Object.keys(slots).length > 0
+          ? 0.72
+          : 0.4;
+
+    return {
+      transcript: transcriptValue,
+      intent,
+      slots,
+      missing_slots: missing,
+      confidence,
+      next_event: nextEvent
+    };
+  }
+
   function scheduleUserTurnProcessing() {
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("scheduleUserTurnProcessing");
+      return;
+    }
     clearPendingResponseTimer();
+    const buffered = peekBufferedCustomerTurn();
+    const delayMs = shouldFlushBufferedTurnSoon(buffered) ? STT_SLOT_READY_WAIT_MS : STT_TURN_MERGE_WAIT_MS;
     pendingResponseTimerRef.current = window.setTimeout(() => {
       pendingResponseTimerRef.current = null;
-      const text = latestFinalTranscriptRef.current.trim();
+      if (isCompletedHardLocked()) {
+        enforceCompletedHardLock("scheduleUserTurnProcessing:callback");
+        return;
+      }
+      const text = peekBufferedCustomerTurn();
       if (!isValidUserTranscript(text)) {
+        clearSttTurn();
+        if (!text) {
+          handleNoSpeech();
+          return;
+        }
         if (text) handleRejectedTranscript(text);
         return;
       }
-      processCustomerTranscript(text);
-    }, CUSTOMER_RESPONSE_DELAY_MS);
+      try {
+        processCustomerTranscript(text);
+      } finally {
+        clearSttTurn();
+      }
+    }, delayMs);
   }
 
   function isValidUserTranscript(text: string) {
+    if (isCompletedHardLocked()) return false;
     if (isDemoControlTranscript(text)) return true;
-    if (demoPhaseRef.current === "completed" && isDemoCompletedCloseIntent(text)) return true;
     return isValidFinalTranscript(
       text,
       {
@@ -1924,12 +2382,8 @@ export default function Home() {
     );
   }
 
-  function getActiveAnalysis() {
-    return confirmedAnalysisRef.current ?? pendingAnalysisRef.current ?? analysis;
-  }
-
   function hasActiveServiceContext() {
-    return Boolean(activeDemoServiceRef.current) || demoPhaseRef.current === "confirming" || demoPhaseRef.current === "completed";
+    return Boolean(activeDemoServiceRef.current) || demoPhaseRef.current === "confirming";
   }
 
   function isDemoControlTranscript(text: string) {
@@ -1945,8 +2399,6 @@ export default function Home() {
     ) {
       return true;
     }
-    if (demoPhaseRef.current === "completed" && isDemoCompletedCloseIntent(clean)) return true;
-
     return false;
   }
 
@@ -1966,12 +2418,12 @@ export default function Home() {
     const normalized = clean.toLowerCase().replace(/\s+/g, " ");
     const isDemoControlCommand = isDemoControlTranscript(clean);
     if (!clean) return false;
+    if (demoPhaseRef.current === "followup_listening") return true;
     if (isAssistantTurnActive() && !isDemoControlCommand) return false;
     if (!isDemoControlCommand && isInsideAssistantEchoGuard()) return false;
     if (isProbablyForeignNoise(clean) && clean.length < 24) return false;
     if (/고객\s*다른\s*기분나/.test(clean)) return false;
     if (!isDemoControlCommand && normalized === lastProcessedTranscriptRef.current) return false;
-    if (demoPhaseRef.current === "completed" && isDemoCompletedCloseIntent(clean)) return true;
     if (!isDemoControlCommand && isAssistantEcho(clean, lastAssistantTextRef.current)) return false;
     if (isContextualShortSlot(clean)) return true;
     if (clean.length <= 2 && !hasActiveServiceContext()) return false;
@@ -1992,124 +2444,12 @@ export default function Home() {
     console.debug("Rejected customer transcript before logging", text);
   }
 
-  function safeCreateResponse(payload: { type: "response.create"; response: Record<string, unknown> }) {
-    const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open") return false;
-    if (isResponseInProgressRef.current) {
-      console.debug("Babelfish response already in progress.");
-      return false;
+  function setMicrophoneEnabled(enabled: boolean, source: "auto" | "manual" | "completed" = "auto") {
+    if (isCompletedHardLocked()) {
+      if (enabled) console.log("[DEMO_FLOW] blocked_microphone_enable_after_completed", { source });
+      enabled = false;
+      source = "completed";
     }
-    if (isAssistantSpeakingRef.current || isAssistantAudioPlayingRef.current || isInsideAssistantEchoGuard()) {
-      console.debug("Babelfish response skipped during assistant turn or echo guard.");
-      return false;
-    }
-    isResponseInProgressRef.current = true;
-    isAssistantSpeakingRef.current = true;
-    isAssistantAudioPlayingRef.current = false;
-    lastAssistantStartedAtRef.current = Date.now();
-    lastAssistantMessageAtRef.current = Date.now();
-    markAssistantSpeakingStart(false);
-    dc.send(JSON.stringify(payload));
-    return true;
-  }
-
-  function forceCreateResponse(message: string, bypass = false) {
-    const dc = dcRef.current;
-    if (!dc || dc.readyState !== "open") return false;
-    const hasActiveResponse = isResponseInProgressRef.current || isAssistantSpeakingRef.current || isAssistantAudioPlayingRef.current;
-    if (hasActiveResponse && !bypass) return false;
-    if (hasActiveResponse && bypass) {
-      // 완료/이관 같은 보장 안내는 현재 AI 발화를 끊고라도 새 안내를 내보낸다.
-      dc.send(JSON.stringify({ type: "response.cancel" }));
-      isResponseInProgressRef.current = false;
-      isAssistantSpeakingRef.current = false;
-      isAssistantAudioPlayingRef.current = false;
-      assistantDraftRef.current = "";
-      setAssistantDraft("");
-    }
-    assistantEchoGuardUntilRef.current = 0;
-    isResponseInProgressRef.current = true;
-    isAssistantSpeakingRef.current = true;
-    isAssistantAudioPlayingRef.current = false;
-    lastAssistantStartedAtRef.current = Date.now();
-    lastAssistantMessageAtRef.current = Date.now();
-    expectedAssistantMessageRef.current = message;
-    markAssistantSpeakingStart(false);
-    dc.send(JSON.stringify({
-      type: "response.create",
-      response: {
-        instructions: buildFixedVoiceInstructions(message)
-      }
-    }));
-    return true;
-  }
-
-  function sendRawAssistantResponse(message: string, guaranteed = false) {
-    lastAssistantResponseMessageRef.current = message;
-    lastAssistantMessageAtRef.current = Date.now();
-    if (guaranteed) {
-      if (forceCreateResponse(message, true)) return true;
-      guaranteedAssistantMessageQueueRef.current.push({ message, analysis: null });
-      return false;
-    }
-    const sent = requestAssistantResponse(message);
-    if (sent) expectedAssistantMessageRef.current = message;
-    return sent;
-  }
-
-  function sendAssistantResponse(message: string, relatedAnalysis?: ConciergeAnalysis | null, guaranteed = false) {
-    if (isDemoAssistantOutputLocked()) return false;
-    const active = relatedAnalysis === undefined ? getActiveAnalysis() : relatedAnalysis;
-    const finalMessage = toSpokenBrandName(active && active.serviceType !== "unknown" ? ensureProviderMention(message, active) : message);
-    lastAssistantResponseMessageRef.current = finalMessage;
-    lastAssistantMessageAtRef.current = Date.now();
-    if (guaranteed) {
-      if (forceCreateResponse(finalMessage, true)) return true;
-      guaranteedAssistantMessageQueueRef.current.push({ message: finalMessage, analysis: !active || active.serviceType === "unknown" ? null : active });
-      return false;
-    }
-    return requestAssistantResponse(finalMessage);
-  }
-
-  function flushGuaranteedAssistantMessage() {
-    const queued = guaranteedAssistantMessageQueueRef.current[0];
-    if (!queued) return;
-    if (isResponseInProgressRef.current || isAssistantSpeakingRef.current || isAssistantAudioPlayingRef.current) return;
-    lastAssistantResponseMessageRef.current = queued.message;
-    if (forceCreateResponse(queued.message)) guaranteedAssistantMessageQueueRef.current.shift();
-  }
-
-  function requestAssistantResponse(instructions?: string) {
-    return safeCreateResponse({
-      type: "response.create",
-      response: instructions
-        ? { instructions: buildFixedVoiceInstructions(instructions) }
-        : {}
-    });
-  }
-
-  function scheduleAssistantResponse(instructions: string, delayMs = 0, relatedAnalysis?: ConciergeAnalysis | null) {
-    if (isDemoAssistantOutputLocked()) return;
-    if (responseTimerRef.current) window.clearTimeout(responseTimerRef.current);
-    responseTimerRef.current = window.setTimeout(() => {
-      responseTimerRef.current = null;
-      const active = relatedAnalysis === undefined ? getActiveAnalysis() : relatedAnalysis;
-      const finalInstructions = toSpokenBrandName(active && active.serviceType !== "unknown" ? ensureProviderMention(instructions, active) : instructions);
-      lastAssistantResponseMessageRef.current = finalInstructions;
-      if (requestAssistantResponse(finalInstructions)) {
-        expectedAssistantMessageRef.current = finalInstructions;
-        lastAssistantMessageAtRef.current = Date.now();
-        appendLog("assistant", finalInstructions);
-      } else if (!isAssistantTurnActive()) {
-        lastAssistantMessageAtRef.current = Date.now();
-        appendLog("assistant", finalInstructions);
-        setAssistHint("음성 응답 재시도 가능");
-        updateAppStatus("LISTENING");
-      }
-    }, delayMs);
-  }
-
-  function setMicrophoneEnabled(enabled: boolean, source: "auto" | "manual" = "auto") {
     isListeningEnabledRef.current = enabled;
     setIsPushToTalkActive(source === "manual" && enabled);
     streamRef.current?.getAudioTracks().forEach((track) => {
@@ -2118,16 +2458,22 @@ export default function Home() {
     if (enabled) {
       setVoiceState(source === "manual" ? "듣는 중" : "고객 말씀 대기 중");
       updateAppStatus("LISTENING");
-      setAssistHint(source === "manual" ? "말씀하신 뒤 다시 버튼을 눌러 확인을 시작하세요." : "고객 말씀을 기다리고 있습니다.");
+      setAssistHint(source === "manual" ? SCRIPT_TEMPLATES.manualListenHint : SCRIPT_TEMPLATES.autoWaitingHint);
     } else {
       lastPushToTalkAtRef.current = Date.now();
-      setVoiceState("고객 말씀 확인 중");
-      setAssistHint(source === "manual" ? "고객 말씀을 확인하고 있습니다." : "AI 응답 중에는 고객 말씀 분석을 잠시 중지합니다.");
+      if (source === "completed") {
+        setVoiceState("완료");
+        setAssistHint(SCRIPT_TEMPLATES.completedLocked);
+      } else {
+        setVoiceState("고객 말씀 확인 중");
+        setAssistHint(source === "manual" ? SCRIPT_TEMPLATES.manualAnalyzingHint : SCRIPT_TEMPLATES.assistantTurnPausedHint);
+      }
     }
   }
 
   function togglePushToTalk() {
     if (phase !== "call" || isAssistantSpeakingRef.current) return;
+    if (isCompletedHardLocked()) return;
     if (demoPhaseRef.current === "idle") {
       recallBabelfish();
       return;
@@ -2136,25 +2482,36 @@ export default function Home() {
   }
 
   function recallBabelfish() {
+    startWatchdog();
+    sttListenerEnabledRef.current = true;
+    waitingForAdditionalRequestRef.current = false;
+    sttTurnBufferRef.current = [];
+    sttLastBufferedAtRef.current = 0;
+    latestFinalTranscriptRef.current = "";
+    activeDemoServiceRef.current = null;
+    setDemoPhase("idle");
     setServiceStatus("listening");
     setStatus("draft");
     updateAppStatus("LISTENING");
     setVoiceState("고객 말씀 대기 중");
-    const message = "다시 호출해 주셔서 감사합니다. 추가로 필요한 서비스를 말씀해 주세요.";
-    appendLog("system", message);
-    scheduleAssistantResponse(message);
+    const message = SCRIPT_TEMPLATES.recall;
+    emitDemoAssistantExact(message, "recall");
   }
 
   function toggleManualMode() {
+    if (isCompletedHardLocked()) {
+      enforceCompletedHardLock("toggleManualMode");
+      return;
+    }
     const next = !isManualModeRef.current;
     isManualModeRef.current = next;
     setIsManualMode(next);
     if (next) {
       setMicrophoneEnabled(false, "manual");
-      setAssistHint("수동 말하기 모드입니다. 필요할 때 서비스 시작 버튼을 눌러주세요.");
+      setAssistHint(SCRIPT_TEMPLATES.manualModeHint);
     } else if (!isAssistantSpeakingRef.current) {
       setMicrophoneEnabled(true, "auto");
-      setAssistHint("자연 대화 모드입니다. 버튼을 누르지 않아도 말씀하실 수 있습니다.");
+      setAssistHint(SCRIPT_TEMPLATES.autoModeHint);
     }
   }
 
@@ -2162,12 +2519,16 @@ export default function Home() {
     if (responseTimerRef.current) window.clearTimeout(responseTimerRef.current);
     responseTimerRef.current = null;
     clearPendingResponseTimer();
+    clearAssistantEchoReleaseTimer();
+    clearFollowupIdleTimer();
     stopWatchdog();
-    if (completionTimerRef.current && demoPhaseRef.current !== "checking") {
+    if (completionTimerRef.current) {
       window.clearTimeout(completionTimerRef.current);
       completionTimerRef.current = null;
       setIsWaitingDemoCompletion(false);
     }
+    completionTimerServiceIdRef.current = null;
+    checkingServiceIdRef.current = null;
     greetingSentRef.current = false;
     hasSentGreetingRef.current = false;
     isGreetingInProgressRef.current = false;
@@ -2181,6 +2542,11 @@ export default function Home() {
     isAssistantAudioPlayingRef.current = false;
     isResponseInProgressRef.current = false;
     userSpeakingRef.current = false;
+    waitingForAdditionalRequestRef.current = false;
+    sttListenerEnabledRef.current = false;
+    sttTurnBufferRef.current = [];
+    sttLastBufferedAtRef.current = 0;
+    latestFinalTranscriptRef.current = "";
     activeDemoServiceRef.current = null;
     setDemoPhase("idle");
     setIsPushToTalkActive(false);
@@ -2195,7 +2561,7 @@ export default function Home() {
     setServiceStatus("standby");
     setStatus("standby");
     setAssistHint(standbyMessage);
-    appendLog("system", "통화가 종료되었습니다. 다시 시작하려면 서비스 시작 버튼을 눌러 주세요.");
+    appendLog("system", "통화가 종료되었습니다.");
     updateAppStatus("AI READY");
     if (showSummary) setPhase("start");
   }
@@ -2226,7 +2592,7 @@ export default function Home() {
           <button className="primary-call" onClick={startCall}>
             <Phone size={22} /> 서비스 시작
           </button>
-          {serviceStatus === "standby" && <p className="assist-note">서비스가 종료되었습니다. 필요하시면 서비스 시작 버튼을 눌러 다시 Babelfish를 호출해 주세요.</p>}
+          {serviceStatus === "standby" && <p className="assist-note">서비스가 종료되었습니다. 필요하시면 다시 Babelfish를 호출해 주세요.</p>}
           {error && <p className="error-text">{error}</p>}
         </section>
       </main>
@@ -2266,9 +2632,9 @@ export default function Home() {
               <span>수동 말하기 모드</span>
             </label>
             <p>{assistHint}</p>
-            <small>기본은 자동으로 듣습니다. 인식이 안 될 때만 버튼을 눌러 다시 말씀해 주세요.</small>
+            <small>기본은 자동으로 듣습니다. 인식이 안 될 때만 화면의 말하기 컨트롤을 사용해 주세요.</small>
             <div className="service-state-grid">
-              <span>현재 상태: {demoPhase === "idle" ? "서비스 대기 중" : demoPhase === "greeting" ? "첫 인사 중" : demoPhase === "collecting" ? "정보 수집 중" : demoPhase === "confirming" ? "고객 확인 중" : demoPhase === "checking" ? "제휴사 확인 중" : "접수 완료"}</span>
+              <span>현재 상태: {demoPhase === "idle" ? "서비스 대기 중" : demoPhase === "greeting" ? "첫 인사 중" : demoPhase === "collecting" ? "정보 수집 중" : demoPhase === "confirming" ? "고객 확인 중" : demoPhase === "checking" ? "제휴사 확인 중" : demoPhase === "followup_listening" ? "후속 요청 대기 중" : demoPhase === "ending" ? "종료 중" : "접수 완료"}</span>
               <span>최근 완료 서비스: {lastCompletedService?.serviceType ?? "없음"}</span>
               <span>만족도 확인: {satisfactionState}</span>
               <span>진행 안내: {isWaitingDemoCompletion ? "결과 확인 중" : demoCompletionHint || "대기 중"}</span>
@@ -2290,7 +2656,7 @@ export default function Home() {
           <InsightCard title="Babelfish가 이해한 내용" tone={demoPhase === "checking" || demoPhase === "completed" ? "ok" : "warn"}>
             <p className="summary-text">{understoodText || currentDemoSummary}</p>
             <div className="confirmation-stack">
-              <span className={`confirm-badge ${demoPhase === "checking" || demoPhase === "completed" ? "ready" : "pending"}`}>{demoPhase === "confirming" ? "고객 확인 필요" : demoPhase === "collecting" ? "추가 정보 필요" : demoPhase === "checking" ? "제휴사 확인 중" : demoPhase === "completed" ? "완료" : "대기 중"}</span>
+              <span className={`confirm-badge ${demoPhase === "checking" || demoPhase === "completed" || demoPhase === "followup_listening" ? "ready" : "pending"}`}>{demoPhase === "confirming" ? "고객 확인 필요" : demoPhase === "collecting" ? "추가 정보 필요" : demoPhase === "checking" ? "제휴사 확인 중" : demoPhase === "completed" ? "완료" : demoPhase === "followup_listening" ? "후속 요청 대기" : demoPhase === "ending" ? "종료 중" : "대기 중"}</span>
               <span>{remainingFieldsRef.current.length > 0 ? `부족 정보: ${remainingFieldsRef.current.join(", ")}` : "부족 정보 없음"}</span>
               <span>{currentDemoNextMessage}</span>
             </div>
@@ -2301,7 +2667,7 @@ export default function Home() {
               <div><dt>지역/업체</dt><dd>{currentDemoSlots.location ?? currentDemoSlots.providerName ?? "-"}</dd></div>
               <div><dt>예약 일시</dt><dd>{currentDemoSlots.appointmentDateTime ?? currentDemoSlots.callTiming ?? "-"}</dd></div>
               <div><dt>차량/상품</dt><dd>{currentDemoSlots.vehicleInfo ?? currentDemoSlots.productName ?? "-"}</dd></div>
-              <div><dt>확인 상태</dt><dd>{demoPhase === "confirming" ? "고객 확인 필요" : demoPhase === "checking" ? "제휴사 확인 중" : demoPhase === "completed" ? "완료" : "정보 수집 중"}</dd></div>
+              <div><dt>확인 상태</dt><dd>{demoPhase === "confirming" ? "고객 확인 필요" : demoPhase === "checking" ? "제휴사 확인 중" : demoPhase === "completed" ? "완료" : demoPhase === "followup_listening" ? "후속 요청 대기" : demoPhase === "ending" ? "종료 중" : "정보 수집 중"}</dd></div>
             </dl>
             {finalSummary && <p className="final-summary">{finalSummary}</p>}
           </InsightCard>

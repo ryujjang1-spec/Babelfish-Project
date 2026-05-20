@@ -3,7 +3,9 @@
 import {
   analyzeRequest,
   isAssistantEcho,
+  isNegativeConfirmation,
   isNoiseLikeTranscript,
+  isShortConfirmation,
   normalizePlaceCandidate,
   type ConciergeAnalysis,
   type OrderStatus,
@@ -97,8 +99,8 @@ const DEMO_SCRIPTS = {
 } as const;
 const FIRST_MESSAGE = DEMO_SCRIPTS.greeting;
 const API_REQUEST_TIMEOUT_MS = 10000;
-const STT_TURN_MERGE_WAIT_MS = 650;
-const STT_SLOT_READY_WAIT_MS = 250;
+const STT_TURN_MERGE_WAIT_MS = 1000;
+const STT_SLOT_READY_WAIT_MS = 500;
 const FOLLOWUP_IDLE_TIMEOUT_MS = 8000;
 const FOLLOWUP_FINAL_TIMEOUT_MS = 15000;
 
@@ -219,7 +221,7 @@ function sanitizeDemoSlotValue(value?: string) {
     .trim()
     .replace(/[.。!?？！,，]+$/g, "")
     .replace(/\s+/g, " ")
-    .replace(/(에서|부터|까지|으로|로|입니다|이에요|예요|이요|요)$/g, "")
+    .replace(/(입니다|이에요|예요|이요|요)$/g, "")
     .trim();
 }
 
@@ -482,7 +484,7 @@ export default function Home() {
     if (!clean) return;
     sttTurnBufferRef.current.push(clean);
     sttLastBufferedAtRef.current = Date.now();
-    latestFinalTranscriptRef.current = peekBufferedCustomerTurn();
+    latestFinalTranscriptRef.current = mergeSttTurnSegments(sttTurnBufferRef.current);
   }
 
   function enforceCompletedHardLock(source: string) {
@@ -516,17 +518,23 @@ export default function Home() {
     console.warn("[REALTIME_SENSOR_ONLY] ignored_model_output", { source });
   }
 
+  function hasNegativeOrCorrectionIntent(text: string) {
+    const normalized = normalizeDemoText(text);
+    return /(아니|아니요|아냐|노|no|싫어|싫습니다|틀렸|틀려|다시|변경|수정|취소|그건 아니|잘못|아닙니다)/.test(normalized);
+  }
+
   function isDemoPositiveIntent(text: string) {
     const normalized = normalizeDemoText(text);
-    if (!normalized) return false;
-    if (isDemoRestartIntent(normalized)) return false;
-
-    return /^(네|예|응|어|그래|좋아|좋습니다|맞아|맞아요|확인|확인해줘|진행|진행해|진행해줘|해주세요|해줘|오케이|ok|ㅇㅇ)$/.test(normalized);
+    return Boolean(normalized)
+      && !hasNegativeOrCorrectionIntent(normalized)
+      && (
+        /^(네|예|응|어|그래|좋아|좋습니다|좋아요|맞아|맞아요|마자요|맞았어|맞았어요|맞췄어|맞췄어요|확인|확인해줘|진행|진행해|진행해줘|해주세요|해줘|오케이|ok|ㅇㅇ)$/.test(normalized)
+        || /(맞아|맞아요|맞습니다|맞았|맞았어요|맞췄|맞췄어요|마자|마자요|맞는|맞네요|그게 맞|네 맞|예 맞)/.test(normalized)
+      );
   }
 
   function isDemoRestartIntent(text: string) {
-    const normalized = normalizeDemoText(text);
-    return /^(아니|아니요|노|no|싫어|싫습니다|다시|다시 해줘|틀렸어|틀렸습니다|변경|바꿔줘|취소)$/.test(normalized);
+    return hasNegativeOrCorrectionIntent(text);
   }
 
   function isDemoEndIntent(text: string) {
@@ -653,8 +661,30 @@ export default function Home() {
     const normalized = normalizeDemoText(text);
     if (!normalized || isDemoForbiddenSlotUtterance(normalized)) return false;
     if (/(택시|불러줘|해줘|다시|취소|재시작|처음부터|진행)/.test(normalized)) return false;
-    return /에서.+(까지|으로|로)?$/.test(normalized) ||
+    return /에서.+(?:까지|으로)?$/.test(normalized) ||
       /(우리집|집|회사|사무실|역|터미널|공항|병원|학교|아파트|동|구|시|군|로|길|강남|판교|수원|서울|성남|분당|잠실|송파|광교|용인|일산|부천|안양|과천|하남|위례)/.test(normalized);
+  }
+
+  function isDemoValidTaxiEndpoint(text?: string) {
+    const clean = sanitizeDemoSlotValue(text);
+    const normalized = normalizeDemoText(clean);
+
+    if (!normalized || normalized.length <= 1) return false;
+    if (isDemoForbiddenSlotUtterance(normalized)) return false;
+    if (/(택시|불러|호출|해줘|해주세요|진행|확인|맞아|맞아요|네|예|아니|취소|변경|수정)/.test(normalized)) return false;
+    if (/(환경여행|환견여행|화경여행|한경여행)/.test(normalized)) return false;
+
+    if (/[가-힣A-Za-z0-9]+역$/.test(clean)) return true;
+    if (/(우리집|집|회사|사무실|터미널|공항|병원|학교|아파트|빌딩|센터|정류장|주차장|정문|본관|응급실)$/.test(clean)) return true;
+    if (regionKeywords.some((region) => clean.includes(region))) return true;
+    if (/(시|구|동|군|읍|면|리|로|길|대로|번길)$/.test(clean)) return true;
+    if (/\d/.test(clean) && /(번|출구|층|호|로|길|동)/.test(clean)) return true;
+
+    return false;
+  }
+
+  function isSuspiciousTaxiEndpoint(text?: string) {
+    return !isDemoValidTaxiEndpoint(text);
   }
 
   function extractDemoSlots(text: string, service: DemoService): Partial<DemoSlots> {
@@ -667,13 +697,18 @@ export default function Home() {
     const location = extractDemoLocation(source);
 
     if (service.serviceType === "taxi" || service.serviceType === "family_mobility") {
-      const routeMatch = source.match(/(.+?)에서\s*(.+?)(?:까지|으로|로)?$/);
+      const routeMatch = source.match(/(.+?)에서\s*(.+?)(?:까지|으로)?$/);
       if (routeMatch) {
-        slots.origin = normalizePlaceCandidate(routeMatch[1].trim());
-        slots.destination = normalizePlaceCandidate(routeMatch[2].replace(/(까지|으로|로)$/g, "").trim());
+        const origin = normalizePlaceCandidate(routeMatch[1].trim());
+        const destination = normalizePlaceCandidate(routeMatch[2].replace(/(까지|으로)$/g, "").trim());
+        if (isDemoValidTaxiEndpoint(origin)) slots.origin = origin;
+        if (isDemoValidTaxiEndpoint(destination)) slots.destination = destination;
       } else if (isDemoValidTaxiPlace(source)) {
-        if (!service.slots.origin) slots.origin = normalizePlaceCandidate(source);
-        else if (!service.slots.destination) slots.destination = normalizePlaceCandidate(source);
+        const endpoint = normalizePlaceCandidate(source);
+        if (isDemoValidTaxiEndpoint(endpoint)) {
+          if (!service.slots.origin) slots.origin = endpoint;
+          else if (!service.slots.destination) slots.destination = endpoint;
+        }
       }
       if (service.serviceType === "taxi") slots.callTiming = "즉시 호출";
       return slots;
@@ -858,6 +893,15 @@ export default function Home() {
   function buildDemoMissingQuestion(service: DemoService) {
     const missing = getDemoMissingFields(service);
     if (missing.length === 0) return buildDemoConfirmationMessage(service);
+    if (service.serviceType === "taxi") {
+      const slots = sanitizeDemoSlots(service.slots);
+      if (missing.includes("출발지") && slots.destination) {
+        return `도착지는 ${slots.destination}으로 확인했습니다. 출발지를 다시 말씀해 주세요.`;
+      }
+      if (missing.includes("도착지") && slots.origin) {
+        return `출발지는 ${slots.origin}으로 확인했습니다. 도착지를 다시 말씀해 주세요.`;
+      }
+    }
     return buildDemoProviderFirstMessage(service);
   }
 
@@ -1429,6 +1473,14 @@ export default function Home() {
     service.rawText = text;
     mergeDemoSlots(service, slots);
     if (service.serviceType === "taxi" && service.slots.origin && service.slots.destination) {
+      const originSuspicious = isSuspiciousTaxiEndpoint(service.slots.origin);
+      const destinationSuspicious = isSuspiciousTaxiEndpoint(service.slots.destination);
+
+      if (originSuspicious || destinationSuspicious) {
+        emitDemoAssistantExact(buildDemoMissingQuestion(service), `place-recheck:${service.id}:${Date.now()}`);
+        return;
+      }
+
       enterDemoConfirming(service, "content");
       return;
     }
@@ -1555,11 +1607,12 @@ export default function Home() {
 
     const active = activeDemoServiceRef.current;
     if (active && demoPhaseRef.current === "confirming") {
-      if (isDemoPositiveIntent(text)) {
+      if (isDemoPositiveIntent(cleanText) || isShortConfirmation(cleanText)) {
         enterDemoChecking(active);
         return;
       }
-      if (isDemoRestartIntent(text)) {
+
+      if (isDemoRestartIntent(cleanText) || isNegativeConfirmation(cleanText)) {
         setDemoPhase("collecting");
         setServiceStatus("listening");
         setStatus("draft");
@@ -1567,6 +1620,7 @@ export default function Home() {
         emitDemoAssistantExact(SCRIPT_TEMPLATES.confirmRetry, `confirm-retry:${active.id}`);
         return;
       }
+
       emitDemoAssistantExact(SCRIPT_TEMPLATES.confirmPrompt, `confirm-prompt:${active.id}`);
       return;
     }
@@ -2238,12 +2292,8 @@ export default function Home() {
     return merged.join(" ").replace(/\s+/g, " ").trim();
   }
 
-  function peekBufferedCustomerTurn() {
-    return mergeSttTurnSegments(sttTurnBufferRef.current);
-  }
-
   function consumeBufferedCustomerTurn() {
-    const text = peekBufferedCustomerTurn();
+    const text = mergeSttTurnSegments(sttTurnBufferRef.current);
     clearSttTurn();
     return text;
   }
@@ -2335,7 +2385,7 @@ export default function Home() {
       return;
     }
     clearPendingResponseTimer();
-    const buffered = peekBufferedCustomerTurn();
+    const buffered = mergeSttTurnSegments(sttTurnBufferRef.current);
     const delayMs = shouldFlushBufferedTurnSoon(buffered) ? STT_SLOT_READY_WAIT_MS : STT_TURN_MERGE_WAIT_MS;
     pendingResponseTimerRef.current = window.setTimeout(() => {
       pendingResponseTimerRef.current = null;
@@ -2343,21 +2393,18 @@ export default function Home() {
         enforceCompletedHardLock("scheduleUserTurnProcessing:callback");
         return;
       }
-      const text = peekBufferedCustomerTurn();
+      const text = consumeBufferedCustomerTurn();
       if (!isValidUserTranscript(text)) {
-        clearSttTurn();
         if (!text) {
           handleNoSpeech();
           return;
         }
-        if (text) handleRejectedTranscript(text);
+
+        handleRejectedTranscript(text);
         return;
       }
-      try {
-        processCustomerTranscript(text);
-      } finally {
-        clearSttTurn();
-      }
+
+      processCustomerTranscript(text);
     }, delayMs);
   }
 

@@ -148,7 +148,7 @@ async function createRealtimeSession(_req: express.Request, res: express.Respons
               },
               turn_detection: {
                 type: "semantic_vad",
-                eagerness: "high",
+                eagerness: "medium",
                 create_response: false,
                 interrupt_response: false
               }
